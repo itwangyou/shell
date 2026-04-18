@@ -133,9 +133,9 @@ gen_aes() {
     print_info "请选择加密算法:"
     echo " 1) 2022-blake3-aes-128-gcm (需 16 字节密钥)"
     echo " 2) 2022-blake3-aes-256-gcm (需 32 字节密钥)"
-    read -p "请选择 [1-2, 默认 2]: " choice
-    local len=32
-    [[ "$choice" == "1" ]] && len=16
+    read -p "请选择 [1-2, 默认 1]: " choice
+    local len=16
+    [[ "$choice" == "2" ]] && len=32
     
     print_warn "正在生成 $len 字节 (对应 $((len*8))位) 密钥..."
     local output=$(sing-box generate rand --base64 "$len" 2>/dev/null)
