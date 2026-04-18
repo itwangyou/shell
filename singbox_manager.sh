@@ -248,18 +248,18 @@ menu() {
     echo " 3. 重启"
     echo " 4. 查看状态"
     echo " 5. 查看日志"
-    echo " 6. 设置自启"
-    echo " 7. 取消自启"
+    echo " 6. 设置开机自启"
+    echo " 7. 取消开机自启"
     echo ""
     echo -e "${GREEN}[配置工具]${NC}"
-    echo " 8. 检查配置"
-    echo " 9. 格式化配置"
-    echo " 10. 合并配置"
+    echo " 8.  检查配置"
+    echo " 9.  格式化配置"
+    echo " 10. 合并配置文件"
     echo ""
     echo -e "${GREEN}[密钥生成]${NC}"
     echo " 11. 生成 UUID"
-    echo " 12. 生成 Reality 密钥"
-    echo " 13. 生成 AES 密钥"
+    echo " 12. 生成 AES 密钥"
+    echo " 13. 生成 Reality 密钥"
     echo ""
     echo -e "${GREEN}[安装服务]${NC}"
     echo " 14. 安装 sing-box"
@@ -275,7 +275,7 @@ menu() {
         1) start_service ;; 2) stop_service ;; 3) restart_service ;; 4) show_status ;;
         5) view_logs ;; 6) enable_autostart ;; 7) disable_autostart ;;
         8) check_config ;; 9) format_config ;; 10) merge_configs ;;
-        11) gen_uuid ;; 12) gen_reality_key ;; 13) gen_aes ;;
+        11) gen_uuid ;; 12) gen_aes ;; 13) gen_reality_key ;;
         14) install_singbox ;; 15) uninstall_singbox ;;
         16) upgrade_singbox ;;
         0) exit 0 ;; *) print_err "无效选项" ;;
