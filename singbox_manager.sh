@@ -179,7 +179,7 @@ After=network-online.target
 Type=simple
 User=root
 ExecStart=$SINGBOX_BIN run -c /etc/sing-box/config.json
-ExecReload=/bin/kill -HUP $MAINPID
+ExecReload=/bin/kill -HUP \$MAINPID
 Restart=on-failure
 LimitNOFILE=infinity
 
@@ -188,6 +188,7 @@ WantedBy=multi-user.target
 EOF
     mkdir -p /etc/sing-box
     systemctl daemon-reload
+    systemctl enable "$SERVICE_NAME" 2>/dev/null || true
     
     print_ok "安装成功！版本: $(sing-box version | head -1)"
     print_info "请将配置文件放入 /etc/sing-box/config.json 然后启动服务"
@@ -199,14 +200,29 @@ uninstall_singbox() {
 
     print_info "正在停止服务..."
     systemctl stop "$SERVICE_NAME" 2>/dev/null || true
-    systemctl disable "$SERVICE_NAME" 2>/dev/null || true
+    pkill -9 sing-box 2>/dev/null || true
+    systemctl reset-failed "$SERVICE_NAME" 2>/dev/null || true
+
+    # 智能卸载：优先包管理器，其次手动删除
+    if command -v apt-get &>/dev/null && dpkg -l 2>/dev/null | grep -q sing-box; then
+        print_info "检测到 apt 安装，正在卸载..."
+        apt-get purge sing-box sing-box-beta -y 2>/dev/null
+    elif command -v apk &>/dev/null && apk info 2>/dev/null | grep -q sing-box; then
+        print_info "检测到 apk 安装，正在卸载..."
+        apk del sing-box 2>/dev/null
+    elif command -v yum &>/dev/null && rpm -q sing-box &>/dev/null 2>/dev/null; then
+        print_info "检测到 yum/rpm 安装，正在卸载..."
+        yum remove sing-box -y 2>/dev/null
+    else
+        print_info "非包管理器安装，正在手动删除文件..."
+        rm -f "$SINGBOX_BIN"
+        rm -f /usr/bin/sing-box
+        rm -f "$SERVICE_FILE"
+    fi
     
-    print_info "正在删除文件..."
-    rm -f "$SINGBOX_BIN"
-    rm -f "$SERVICE_FILE"
     systemctl daemon-reload
-    
-    print_ok "卸载完成！(配置文件已保留在 /etc/sing-box/)"
+    print_ok "卸载完成！(配置文件已保留)"
+    print_info "如需彻底清理，请手动删除 /etc/sing-box/ 和 /var/lib/sing-box/"
 }
 
 # ================= 升级管理 =================
