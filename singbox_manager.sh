@@ -195,24 +195,24 @@ EOF
 }
 
 uninstall_singbox() {
-    read -p "确定要卸载 sing-box 吗？(y/n): " confirm
+    read -p "确定要卸载 sing-box 吗？所有配置和数据将被删除！(y/n): " confirm
     [[ "$confirm" != "y" ]] && return
 
     print_info "正在停止服务..."
     systemctl stop "$SERVICE_NAME" 2>/dev/null || true
     pkill -9 sing-box 2>/dev/null || true
-    systemctl reset-failed "$SERVICE_NAME" 2>/dev/null || true
+    systemctl disable "$SERVICE_NAME" 2>/dev/null || true
 
     # 智能卸载：优先包管理器，其次手动删除
     if command -v apt-get &>/dev/null && dpkg -l 2>/dev/null | grep -q sing-box; then
         print_info "检测到 apt 安装，正在卸载..."
-        apt-get purge sing-box sing-box-beta -y 2>/dev/null
+        apt-get purge sing-box sing-box-beta -y 2>/dev/null || true
     elif command -v apk &>/dev/null && apk info 2>/dev/null | grep -q sing-box; then
         print_info "检测到 apk 安装，正在卸载..."
-        apk del sing-box 2>/dev/null
+        apk del sing-box 2>/dev/null || true
     elif command -v yum &>/dev/null && rpm -q sing-box &>/dev/null 2>/dev/null; then
         print_info "检测到 yum/rpm 安装，正在卸载..."
-        yum remove sing-box -y 2>/dev/null
+        yum remove sing-box -y 2>/dev/null || true
     else
         print_info "非包管理器安装，正在手动删除文件..."
         rm -f "$SINGBOX_BIN"
@@ -220,9 +220,13 @@ uninstall_singbox() {
         rm -f "$SERVICE_FILE"
     fi
     
+    print_info "正在清理配置和数据目录..."
+    rm -rf /etc/sing-box/
+    rm -rf /var/lib/sing-box/
+    
     systemctl daemon-reload
-    print_ok "卸载完成！(配置文件已保留)"
-    print_info "如需彻底清理，请手动删除 /etc/sing-box/ 和 /var/lib/sing-box/"
+    systemctl reset-failed "$SERVICE_NAME" 2>/dev/null || true
+    print_ok "卸载完成！"
 }
 
 # ================= 升级管理 =================
