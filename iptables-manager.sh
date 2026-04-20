@@ -5,6 +5,9 @@
 # 系统: Debian 10/11/12 (需 root 权限)
 # ==========================================
 
+# 强制补全标准 PATH，防止最小化系统或 curl 执行时找不到 sbin 命令
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -32,8 +35,18 @@ init_env() {
     fi
 
     echo -e "\n${YELLOW}📦 检查依赖...${NC}"
-    DEBIAN_FRONTEND=noninteractive apt update -qq >/dev/null 2>&1
-    DEBIAN_FRONTEND=noninteractive apt install -y -qq iptables netfilter-persistent ufw >/dev/null 2>&1
+    apt update -qq
+    # 去掉静默重定向，安装失败直接报错中断
+    if ! apt install -y iptables netfilter-persistent ufw; then
+        echo -e "${RED}❌ 依赖安装失败，请检查网络或软件源后重试${NC}"
+        exit 1
+    fi
+
+    # 验证 iptables 命令是否可用
+    if ! command -v iptables &>/dev/null; then
+        echo -e "${RED}❌ iptables 命令不可用，请检查系统环境${NC}"
+        exit 1
+    fi
 
     if [ "$(sysctl -n net.ipv4.ip_forward)" != "1" ]; then
         sysctl -w net.ipv4.ip_forward=1 >/dev/null
