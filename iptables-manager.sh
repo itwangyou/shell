@@ -1,7 +1,8 @@
 #!/bin/bash
 # ==========================================
-# Debian iptables 透明中转管理脚本 (生产增强版)
+# Debian iptables 透明中转管理脚本 (v2.1 修复版)
 # 功能: 自动检测主网卡 / 添加 / 查看 / 删除 / 重置 NAT 转发
+# 修复: 移除 ufw 强依赖，解决 Debian 12 包冲突问题
 # 系统: Debian 10/11/12 (需 root 权限)
 # ==========================================
 
@@ -36,8 +37,9 @@ init_env() {
 
     echo -e "\n${YELLOW}📦 检查依赖...${NC}"
     apt update -qq
-    # 去掉静默重定向，安装失败直接报错中断
-    if ! apt install -y iptables netfilter-persistent ufw; then
+    # 修复: 移除 ufw 强依赖，避免 Debian 12 包冲突 (Breaks: netfilter-persistent)
+    # 云主机端口放行请以控制台安全组为准，本地 ufw 非必需
+    if ! apt install -y iptables netfilter-persistent; then
         echo -e "${RED}❌ 依赖安装失败，请检查网络或软件源后重试${NC}"
         exit 1
     fi
@@ -87,7 +89,10 @@ add_rule() {
     for p in $PROTOS; do
         if ! iptables -t nat -C PREROUTING -p $p --dport "$LPORT" -j DNAT --to-destination "$BIP:$BPORT" 2>/dev/null; then
             iptables -t nat -A PREROUTING -p $p --dport "$LPORT" -j DNAT --to-destination "$BIP:$BPORT"
-            ufw allow "$LPORT/$p" >/dev/null 2>&1 || true
+            # 智能放行: 仅当系统已安装 ufw 时才执行，避免报错
+            if command -v ufw &>/dev/null; then
+                ufw allow "$LPORT/$p" >/dev/null 2>&1 || true
+            fi
             echo -e "  ${GREEN}✅ 已添加 $p: $LPORT → $BIP:$BPORT${NC}"
         else
             echo -e "  ${YELLOW}⚠️ 规则已存在: $p $LPORT${NC}"
@@ -147,7 +152,7 @@ main() {
     init_env
     while true; do
         echo -e "\n${GREEN}========================================${NC}"
-        echo -e "${GREEN}  Debian iptables 中转管理工具${NC}"
+        echo -e "${GREEN}  Debian iptables 中转管理工具 (v2.1)${NC}"
         echo -e "${GREEN}========================================${NC}"
         echo -e "  [1] 添加转发线路"
         echo -e "  [2] 查看当前规则"
