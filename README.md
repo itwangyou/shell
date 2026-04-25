@@ -14,3 +14,8 @@ nftables管理
 ```
 curl -sL https://raw.githubusercontent.com/itwangyou/shell/main/nftables-manager-debian.sh -o /tmp/nft.sh && sh /tmp/nft.sh
 ```
+
+nftables管理(Alpine)
+```
+curl -sL https://raw.githubusercontent.com/itwangyou/shell/main/nftables-manager-alpine.sh -o /tmp/nft.sh && sh /tmp/nft.sh
+```
