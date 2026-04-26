@@ -50,9 +50,7 @@ init_nft_table() {
 # 3. 保存规则 (持久化)
 save_rules() {
     mkdir -p /etc/nftables.d
-    # 先写 destroy 指令 (不存在的 table 不报错)，确保 nft -f 加载时先删旧 table 再创建
-    echo "destroy table ip $NFT_TABLE" > "$RULES_FILE"
-    nft list table ip "$NFT_TABLE" >> "$RULES_FILE"
+    nft list table ip "$NFT_TABLE" > "$RULES_FILE"
     echo -e "${GREEN}💾 规则已保存至 $RULES_FILE${NC}"
 }
 
@@ -65,24 +63,29 @@ init_env() {
         read -p "👉 仍然继续？(y/n): " c; [[ ! "$c" =~ ^[Yy]$ ]] && exit 1
     fi
 
-    echo -e "\n${YELLOW}📦 检查依赖...${NC}"
-    apt update -qq
-
-    # 检测并安装缺失的依赖
+    # 检测并安装缺失的依赖（仅在缺失时才 update）
     local MISSING=""
-    if ! command -v ip &>/dev/null; then
-        MISSING="iproute2"
-    fi
-    [[ -n "$MISSING" ]] && echo -e "${YELLOW}   安装缺失依赖: $MISSING${NC}"
-    if ! apt install -y $MISSING nftables; then
-        echo -e "${RED}❌ 依赖安装失败${NC}"; exit 1
+    if ! command -v ip &>/dev/null; then MISSING+="iproute2 "; fi
+    if ! command -v nft &>/dev/null; then MISSING+="nftables "; fi
+    if [[ -n "$MISSING" ]]; then
+        echo -e "${YELLOW}📦 安装缺失依赖: $MISSING${NC}"
+        apt update -qq
+        if ! apt install -y $MISSING; then
+            echo -e "${RED}❌ 依赖安装失败${NC}"; exit 1
+        fi
+    else
+        echo -e "${GREEN}✅ 依赖已完备，跳过安装${NC}"
     fi
 
     # 开启内核转发
-    sysctl -w net.ipv4.ip_forward=1 &>/dev/null
-    grep -q "^net.ipv4.ip_forward" /etc/sysctl.conf && \
-        sed -i 's/^net.ipv4.ip_forward.*/net.ipv4.ip_forward=1/' /etc/sysctl.conf || \
-        echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+    if grep -rq "^net.ipv4.ip_forward=1" /etc/sysctl.conf /etc/sysctl.d/ 2>/dev/null; then
+        echo -e "${GREEN}✅ 内核转发已启用，跳过${NC}"
+    else
+        sysctl -w net.ipv4.ip_forward=1 &>/dev/null
+        mkdir -p /etc/sysctl.d
+        echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-forward.conf
+        echo -e "${GREEN}✅ 已开启内核转发 (/etc/sysctl.d/99-forward.conf)${NC}"
+    fi
 
     # 检测主网卡
     detect_main_iface
@@ -240,6 +243,7 @@ delete_rule() {
     echo ""
     read -p "👉 输入要删除的规则 handle 编号: " HANDLE
     [[ -z "$HANDLE" ]] && { echo -e "${RED}❌ handle 不能为空${NC}"; return; }
+    ! [[ "$HANDLE" =~ ^[0-9]+$ ]] && { echo -e "${RED}❌ handle 必须为数字${NC}"; return; }
 
     # 检查 handle 是否属于 prerouting 链 (转发规则)
     if nft -a list chain ip "$NFT_TABLE" prerouting 2>/dev/null | grep -qE "handle ${HANDLE}$"; then
@@ -248,7 +252,7 @@ delete_rule() {
         del_line=$(nft -a list chain ip "$NFT_TABLE" prerouting 2>/dev/null | grep -E "handle ${HANDLE}$")
         local del_port del_proto
         del_port=$(echo "$del_line" | grep -oP 'dport \K[0-9]+')
-        del_proto=$(echo "$del_line" | grep -oP '^(tcp|udp)' | head -1)
+        del_proto=$(echo "$del_line" | grep -oP '\b(tcp|udp)\b' | head -1)
 
         nft delete rule ip "$NFT_TABLE" prerouting handle "$HANDLE"
 
