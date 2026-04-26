@@ -33,7 +33,7 @@ check_root() {
 
 check_bin() {
     if ! command -v sing-box &> /dev/null; then
-        print_err "未检测到 sing-box 程序，请先选择 14 安装。"
+        print_err "未检测到 sing-box 程序，请先选择 13 安装。"
         return 1
     fi
 }
@@ -79,8 +79,12 @@ disable_autostart() {
 }
 
 view_logs() {
-    print_info "显示最近 50 条日志 (Ctrl+C 退出):"
-    journalctl -u "$SERVICE_NAME" --no-pager -n 50 -f 2>/dev/null || print_warn "无日志或无服务"
+    print_info "显示最近 50 条日志 (按回车键退出):"
+    journalctl -u "$SERVICE_NAME" --no-pager -n 50 -f 2>/dev/null &
+    local pid=$!
+    read -r
+    kill $pid 2>/dev/null || true
+    wait $pid 2>/dev/null || true
 }
 
 # ================= 配置工具 =================
@@ -98,17 +102,6 @@ format_config() {
     [[ -n "$cfg" ]] && [[ -f "$cfg" ]] || { print_err "未找到配置文件"; return; }
     print_info "格式化: $cfg"
     sing-box format -w -c "$cfg" && print_ok "格式化完成" || print_err "失败"
-}
-
-merge_configs() {
-    check_bin || return
-    print_info "请输入要合并的配置文件路径（空格分隔，按回车结束）："
-    read -r files
-    [[ -n "$files" ]] || return
-    print_info "执行合并..."
-    local args=()
-    for f in $files; do args+=("-c" "$f"); done
-    sing-box merge /tmp/merged_config.json "${args[@]}" && print_ok "已合并到 /tmp/merged_config.json" || print_err "合并失败"
 }
 
 # ================= 密钥生成 =================
@@ -146,7 +139,7 @@ gen_aes() {
 
 # ================= 安装与卸载 =================
 install_singbox() {
-    command -v sing-box &>/dev/null && { print_warn "sing-box 已安装，请使用升级选项 (16)"; return; }
+    command -v sing-box &>/dev/null && { print_warn "sing-box 已安装，请使用升级选项 (15)"; return; }
     print_info "正在获取最新版本..."
     local latest=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep -o '"tag_name": *"[^"]*"' | grep -o '[0-9.]*')
     [[ -z "$latest" ]] && { print_err "无法获取版本信息"; return; }
@@ -246,15 +239,26 @@ upgrade_singbox() {
     
     # 复用 install 逻辑中的下载部分
     local arch=$(uname -m)
-    [[ "$arch" == "x86_64" ]] && arch="amd64" || [[ "$arch" == "aarch64" ]] && arch="arm64"
+    case "$arch" in
+        x86_64) arch="amd64" ;;
+        aarch64) arch="arm64" ;;
+        *) print_err "不支持的架构: $arch"; return ;;
+    esac
     local url="https://github.com/SagerNet/sing-box/releases/download/v${latest}/sing-box-${latest}-linux-${arch}.tar.gz"
     
     curl -sL -o /tmp/sing-box.tar.gz "$url"
-    tar -xzf /tmp/sing-box.tar.gz -C /tmp --strip-components=1
-    cp /tmp/sing-box "$SINGBOX_BIN"
+    mkdir -p /tmp/sb-upgrade
+    tar -xzf /tmp/sing-box.tar.gz -C /tmp/sb-upgrade --strip-components=1
+    cp /tmp/sb-upgrade/sing-box "$SINGBOX_BIN"
     chmod +x "$SINGBOX_BIN"
-    rm -f /tmp/sing-box.tar.gz /tmp/sing-box
-    print_ok "升级成功！重启服务以生效"
+    rm -rf /tmp/sing-box.tar.gz /tmp/sb-upgrade
+    
+    if ! sing-box version &>/dev/null; then
+        print_err "升级后二进制验证失败，请检查是否下载了错误的架构"
+        return
+    fi
+    print_ok "升级成功！版本: $(sing-box version | head -1)"
+    print_info "请手动重启服务以生效: systemctl restart sing-box"
 }
 
 # ================= 菜单 =================
@@ -274,17 +278,16 @@ menu() {
     echo -e "${GREEN}[配置工具]${NC}"
     echo " 8.  检查配置"
     echo " 9.  格式化配置"
-    echo " 10. 合并配置文件"
     echo ""
     echo -e "${GREEN}[密钥生成]${NC}"
-    echo " 11. 生成 UUID"
-    echo " 12. 生成 AES 密钥"
-    echo " 13. 生成 Reality 密钥"
+    echo " 10. 生成 UUID"
+    echo " 11. 生成 AES 密钥"
+    echo " 12. 生成 Reality 密钥"
     echo ""
     echo -e "${GREEN}[安装服务]${NC}"
-    echo " 14. 安装 sing-box"
-    echo " 15. 卸载 sing-box"
-    echo " 16. 升级 sing-box"
+    echo " 13. 安装 sing-box"
+    echo " 14. 卸载 sing-box"
+    echo " 15. 升级 sing-box"
     echo ""
     echo " 0. 退出"
     echo ""
@@ -294,10 +297,10 @@ menu() {
     case $choice in
         1) start_service ;; 2) stop_service ;; 3) restart_service ;; 4) show_status ;;
         5) view_logs ;; 6) enable_autostart ;; 7) disable_autostart ;;
-        8) check_config ;; 9) format_config ;; 10) merge_configs ;;
-        11) gen_uuid ;; 12) gen_aes ;; 13) gen_reality_key ;;
-        14) install_singbox ;; 15) uninstall_singbox ;;
-        16) upgrade_singbox ;;
+        8) check_config ;; 9) format_config ;;
+        10) gen_uuid ;; 11) gen_aes ;; 12) gen_reality_key ;;
+        13) install_singbox ;; 14) uninstall_singbox ;;
+        15) upgrade_singbox ;;
         0) exit 0 ;; *) print_err "无效选项" ;;
     esac
 }
