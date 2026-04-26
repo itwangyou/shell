@@ -1,6 +1,6 @@
 # shell
 
-singbox管理
+singbox管理(Debian)
 ```
 bash <(curl -sL https://raw.githubusercontent.com/itwangyou/shell/main/singbox_manager.sh)
 ```
@@ -10,17 +10,12 @@ singbox管理(Alpine)
 bash <(curl -sL https://raw.githubusercontent.com/itwangyou/shell/main/singbox_manager_alpine.sh)
 ```
 
-iptables管理
+nftables管理(Debian)
 ```
-bash <(curl -sL https://raw.githubusercontent.com/itwangyou/shell/main/iptables-manager.sh)
-```
-
-nftables管理
-```
-bash <(curl -sL https://raw.githubusercontent.com/itwangyou/shell/main/nftables-manager-debian.sh)
+bash <(curl -sL https://raw.githubusercontent.com/itwangyou/shell/main/nftables_manager_debian.sh)
 ```
 
 nftables管理(Alpine)
 ```
-curl -sL https://raw.githubusercontent.com/itwangyou/shell/main/nftables-manager-alpine.sh -o /tmp/nft.sh && sh /tmp/nft.sh
+bash <(curl -sL https://raw.githubusercontent.com/itwangyou/shell/main/nftables_manager_alpine.sh)
 ```
