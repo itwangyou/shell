@@ -17,7 +17,7 @@ bash <(curl -sL https://raw.githubusercontent.com/itwangyou/shell/main/iptables-
 
 nftables管理
 ```
-curl -sL https://raw.githubusercontent.com/itwangyou/shell/main/nftables-manager-debian.sh -o /tmp/nft.sh && sh /tmp/nft.sh
+bash <(curl -sL https://raw.githubusercontent.com/itwangyou/shell/main/nftables-manager-debian.sh)
 ```
 
 nftables管理(Alpine)
