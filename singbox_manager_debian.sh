@@ -1,6 +1,6 @@
 #!/bin/bash
-# sing-box 全能管理脚本 v2.0
-# 功能：服务管理 / 配置工具 / 密钥生成 / 一键安装卸载 / 数据库管理 / 自动升级
+# sing-box 全能管理脚本 v2.1
+# 功能：服务管理 / 配置工具 / 密钥生成 / 一键安装卸载 / 自动升级
 
 set -euo pipefail
 
@@ -88,12 +88,14 @@ view_logs() {
 }
 
 # ================= 配置工具 =================
-check_config() {
+view_config() {
     check_bin || return
     local cfg=$(get_config_path)
     [[ -n "$cfg" ]] && [[ -f "$cfg" ]] || { print_err "未找到配置文件"; return; }
-    print_info "检查配置: $cfg"
-    sing-box check -c "$cfg" && print_ok "配置正确" || print_err "配置有误"
+    print_info "配置文件: $cfg"
+    echo "-----------------------------"
+    cat "$cfg"
+    echo "-----------------------------"
 }
 
 format_config() {
@@ -141,7 +143,7 @@ gen_aes() {
 install_singbox() {
     command -v sing-box &>/dev/null && { print_warn "sing-box 已安装，请使用升级选项 (15)"; return; }
     print_info "正在获取最新版本..."
-    local latest=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep -o '"tag_name": *"[^"]*"' | grep -o '[0-9.]*')
+    local latest=$(curl -s --connect-timeout 10 --max-time 15 https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep -o '"tag_name": *"[^"]*"' | grep -o '[0-9.]*')
     [[ -z "$latest" ]] && { print_err "无法获取版本信息"; return; }
     
     print_info "最新版本: $latest，正在下载..."
@@ -153,8 +155,11 @@ install_singbox() {
     esac
     
     local url="https://github.com/SagerNet/sing-box/releases/download/v${latest}/sing-box-${latest}-linux-${arch}.tar.gz"
-    curl -sL -o /tmp/sing-box.tar.gz "$url"
-    
+    if ! curl -sfL --connect-timeout 15 --max-time 60 -o /tmp/sing-box.tar.gz "$url"; then
+        print_err "下载失败，请检查网络或版本可用性"
+        return
+    fi
+
     print_info "正在安装..."
     mkdir -p /tmp/sb-install
     tar -xzf /tmp/sing-box.tar.gz -C /tmp/sb-install --strip-components=1
@@ -227,7 +232,7 @@ uninstall_singbox() {
 upgrade_singbox() {
     check_bin || return
     print_info "检查新版本..."
-    local latest=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep -o '"tag_name": *"[^"]*"' | grep -o '[0-9.]*')
+    local latest=$(curl -s --connect-timeout 10 --max-time 15 https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep -o '"tag_name": *"[^"]*"' | grep -o '[0-9.]*')
     local current=$(sing-box version | head -1 | grep -o '[0-9.]*' | head -1)
     
     [[ -z "$latest" ]] && { print_err "网络错误"; return; }
@@ -245,18 +250,29 @@ upgrade_singbox() {
         *) print_err "不支持的架构: $arch"; return ;;
     esac
     local url="https://github.com/SagerNet/sing-box/releases/download/v${latest}/sing-box-${latest}-linux-${arch}.tar.gz"
-    
-    curl -sL -o /tmp/sing-box.tar.gz "$url"
-    mkdir -p /tmp/sb-upgrade
-    tar -xzf /tmp/sing-box.tar.gz -C /tmp/sb-upgrade --strip-components=1
-    cp /tmp/sb-upgrade/sing-box "$SINGBOX_BIN"
-    chmod +x "$SINGBOX_BIN"
-    rm -rf /tmp/sing-box.tar.gz /tmp/sb-upgrade
-    
-    if ! sing-box version &>/dev/null; then
-        print_err "升级后二进制验证失败，请检查是否下载了错误的架构"
+    if ! curl -sfL --connect-timeout 15 --max-time 60 -o /tmp/sing-box.tar.gz "$url"; then
+        print_err "下载失败，请检查网络或版本可用性"
         return
     fi
+    mkdir -p /tmp/sb-upgrade
+    tar -xzf /tmp/sing-box.tar.gz -C /tmp/sb-upgrade --strip-components=1
+
+    # 覆盖前自动备份旧版本（验证失败可回滚）
+    [[ -f "$SINGBOX_BIN" ]] && cp "$SINGBOX_BIN" "${SINGBOX_BIN}.bak"
+
+    cp /tmp/sb-upgrade/sing-box "$SINGBOX_BIN"
+    chmod +x "$SINGBOX_BIN"
+
+    if ! sing-box version &>/dev/null; then
+        print_err "升级后二进制验证失败，正在恢复旧版本..."
+        [[ -f "${SINGBOX_BIN}.bak" ]] && mv "${SINGBOX_BIN}.bak" "$SINGBOX_BIN"
+        rm -rf /tmp/sing-box.tar.gz /tmp/sb-upgrade
+        return
+    fi
+
+    # 验证通过，清理备份和临时文件
+    rm -f "${SINGBOX_BIN}.bak"
+    rm -rf /tmp/sing-box.tar.gz /tmp/sb-upgrade
     print_ok "升级成功！版本: $(sing-box version | head -1)"
     print_info "请手动重启服务以生效: systemctl restart sing-box"
 }
@@ -276,7 +292,7 @@ menu() {
     echo " 7. 取消开机自启"
     echo ""
     echo -e "${GREEN}[配置工具]${NC}"
-    echo " 8.  检查配置"
+    echo " 8.  查看配置"
     echo " 9.  格式化配置"
     echo ""
     echo -e "${GREEN}[密钥生成]${NC}"
@@ -297,7 +313,7 @@ menu() {
     case $choice in
         1) start_service ;; 2) stop_service ;; 3) restart_service ;; 4) show_status ;;
         5) view_logs ;; 6) enable_autostart ;; 7) disable_autostart ;;
-        8) check_config ;; 9) format_config ;;
+        8) view_config ;; 9) format_config ;;
         10) gen_uuid ;; 11) gen_aes ;; 12) gen_reality_key ;;
         13) install_singbox ;; 14) uninstall_singbox ;;
         15) upgrade_singbox ;;
