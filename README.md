@@ -2,7 +2,7 @@
 
 singbox管理(Debian)
 ```
-bash <(curl -sL https://raw.githubusercontent.com/itwangyou/shell/main/singbox_manager.sh)
+bash <(curl -sL https://raw.githubusercontent.com/itwangyou/shell/main/singbox_manager_debian.sh)
 ```
 
 singbox管理(Alpine)
