@@ -324,9 +324,12 @@ network_menu() {
     while true; do
         section "网络管理"
         cat <<EOF
-  1) 内网 IP          2) 公网 IP
-  3) 监听端口          4) 连接统计
-  5) ping 测试         0) 返回
+  1. 内网 IP
+  2. 公网 IP
+  3. 监听端口
+  4. 连接统计
+  5. ping 测试
+  0. 返回
 EOF
         read -rp "请选择: " n
         case "$n" in
@@ -434,8 +437,10 @@ process_menu() {
     while true; do
         section "进程管理"
         cat <<EOF
-  1) 实时监控 (top/htop)    2) 查找进程
-  3) 结束进程 (kill)         0) 返回
+  1. 实时监控 (top/htop)
+  2. 查找进程
+  3. 结束进程 (kill)
+  0. 返回
 EOF
         read -rp "请选择: " p
         case "$p" in
@@ -494,9 +499,13 @@ service_menu() {
     while true; do
         section "服务管理: $svc"
         cat <<EOF
-  1) 状态    2) 启动    3) 停止
-  4) 重启    5) 自启    6) 取消自启
-  0) 返回
+  1. 查看状态
+  2. 启动服务
+  3. 停止服务
+  4. 重启服务
+  5. 开机自启
+  6. 取消自启
+  0. 返回
 EOF
         read -rp "请选择: " s
         case "$s" in
@@ -580,10 +589,14 @@ apk_menu() {
     while true; do
         section "apk 包管理"
         cat <<EOF
-  1) 更新索引    2) 升级全部
-  3) 安装        4) 卸载
-  5) 搜索        6) 已装列表
-  7) 一键常用包  0) 返回
+  1. 更新索引 (apk update)
+  2. 升级全部 (apk upgrade)
+  3. 安装软件
+  4. 卸载软件
+  5. 搜索软件
+  6. 已装列表
+  7. 一键安装常用包
+  0. 返回
 EOF
         read -rp "请选择: " p
         case "$p" in
@@ -623,10 +636,13 @@ setup_menu() {
     while true; do
         section "Alpine 配置向导"
         cat <<EOF
-  1) setup-sshd       2) setup-timezone
-  3) setup-ntp        4) setup-hostname
-  5) setup-apkrepos   6) setup-interfaces
-  0) 返回
+  1. setup-sshd
+  2. setup-timezone
+  3. setup-ntp
+  4. setup-hostname
+  5. setup-apkrepos
+  6. setup-interfaces
+  0. 返回
 EOF
         read -rp "请选择: " s
         case "$s" in
@@ -647,8 +663,10 @@ alpine_menu() {
     while true; do
         section "Alpine 专属工具"
         cat <<EOF
-  1) apk 包管理    2) OpenRC 服务
-  3) setup 向导    0) 返回
+  1. apk 包管理
+  2. OpenRC 服务
+  3. setup 向导
+  0. 返回
 EOF
         read -rp "请选择: " a
         case "$a" in
@@ -697,9 +715,12 @@ ssh_menu() {
         section "SSH 安全加固"
         warn "操作前请另开一个 SSH 会话，避免被锁"
         cat <<EOF
-  1) 修改端口          2) 禁止 root 密码登录
-  3) 完全禁用密码登录   4) 添加公钥
-  5) 查看当前配置       0) 返回
+  1. 修改 SSH 端口
+  2. 禁止 root 密码登录
+  3. 完全禁用密码登录
+  4. 添加公钥到 authorized_keys
+  5. 查看当前 SSH 配置
+  0. 返回
 EOF
         read -rp "请选择: " s
         case "$s" in
@@ -734,8 +755,9 @@ swap_menu() {
         section "Swap 管理"
         info "当前 Swap:"; swapon --show 2>/dev/null || cat /proc/swaps 2>/dev/null
         cat <<EOF
-  1) 创建 Swap 文件    2) 删除 Swap 文件
-  0) 返回
+  1. 创建 Swap 文件
+  2. 删除 Swap 文件
+  0. 返回
 EOF
         read -rp "请选择: " s
         local file="/swapfile"
@@ -764,7 +786,9 @@ bbr_menu() {
     while true; do
         section "BBR 加速"
         cat <<EOF
-  1) 开启 BBR    2) 查看状态    0) 返回
+  1. 开启 BBR
+  2. 查看 BBR 状态
+  0. 返回
 EOF
         read -rp "请选择: " s
         case "$s" in
@@ -790,9 +814,11 @@ docker_menu() {
         section "Docker"
         if has docker; then info "版本: $(docker --version)"; else warn "未安装"; fi
         cat <<EOF
-  1) 安装 Docker    2) 启动/查看服务
-  3) 容器列表      4) 镜像列表
-  0) 返回
+  1. 安装 Docker
+  2. 启动/查看 Docker 服务
+  3. 容器列表 (docker ps -a)
+  4. 镜像列表 (docker images)
+  0. 返回
 EOF
         read -rp "请选择: " s
         case "$s" in
@@ -824,9 +850,11 @@ advanced_menu() {
     while true; do
         section "进阶工具"
         cat <<EOF
-  1) SSH 加固    2) Swap
-  3) BBR         4) Docker
-  0) 返回
+  1. SSH 安全加固
+  2. Swap 虚拟内存
+  3. BBR 加速
+  4. Docker 安装与管理
+  0. 返回
 EOF
         read -rp "请选择: " a
         case "$a" in
@@ -855,12 +883,19 @@ main_menu() {
         printf "  ${BOLD}${CYAN}└──────────────────────────────────────────┘${RESET}\n\n"
 
         cat <<EOF
-   ${GREEN}1)${RESET} 系统信息    ${GREEN}2)${RESET} 资源监控    ${GREEN}3)${RESET} 网络管理
-   ${GREEN}4)${RESET} 磁盘管理    ${GREEN}5)${RESET} 进程管理    ${GREEN}6)${RESET} 服务管理
-   ${GREEN}7)${RESET} 用户管理    ${GREEN}8)${RESET} 防火墙    ${GREEN}9)${RESET} 系统更新
-   ${GREEN}t)${RESET} 进阶工具   ${GREEN}0)${RESET} 退出
+   ${GREEN}1.${RESET} 系统信息
+   ${GREEN}2.${RESET} 资源监控
+   ${GREEN}3.${RESET} 网络管理
+   ${GREEN}4.${RESET} 磁盘管理
+   ${GREEN}5.${RESET} 进程管理
+   ${GREEN}6.${RESET} 服务管理
+   ${GREEN}7.${RESET} 用户管理
+   ${GREEN}8.${RESET} 防火墙管理
+   ${GREEN}9.${RESET} 系统更新
+   ${GREEN}10.${RESET} 进阶工具 (SSH加固 / Swap / BBR / Docker)
 EOF
-        (( IS_ALPINE )) && echo -e "   ${GREEN}a)${RESET} Alpine 专属"
+        (( IS_ALPINE )) && echo -e "   ${GREEN}11.${RESET} Alpine 专属工具"
+        echo -e "   ${GREEN}0.${RESET} 退出"
         echo
         read -rp "请输入选项: " choice
         case "$choice" in
@@ -873,8 +908,8 @@ EOF
             7) user_menu ;;
             8) firewall_menu ;;
             9) system_update ;;
-            t|T) advanced_menu ;;
-            a|A) alpine_menu ;;
+            10) advanced_menu ;;
+            11) alpine_menu ;;
             0) info "再见!"; exit 0 ;;
             *) err "无效选项"; sleep 1 ;;
         esac
