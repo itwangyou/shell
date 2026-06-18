@@ -95,20 +95,149 @@ if [ -f /etc/alpine-release ]; then IS_ALPINE=1; else IS_ALPINE=0; fi
 need() { has "$1" || { err "未找到 $1（可尝试: $SUDO apk add alpine-conf）"; return 1; }; }
 
 # ---------------------------------------------------------------------------
+# 格式化输出工具
+# ---------------------------------------------------------------------------
+# 计算字符串在终端显示宽度（粗略处理 ANSI 转义码）
+visible_len() {
+    local s="$1"
+    # 去掉 ANSI 转义序列
+    s=$(echo "$s" | sed 's/\x1b\[[0-9;]*m//g')
+    echo "${#s}"
+}
+
+# 打印水平表格
+# 用法1: print_table <行1> <行2> ...  （行内字段用制表符 \t 分隔）
+# 用法2: printf '...' | print_table    （从标准输入读取）
+print_table() {
+    local -a rows=()
+    local -a widths=()
+    local max_cols=0 i line cell len
+
+    if [[ $# -gt 0 ]]; then
+        rows=("$@")
+    else
+        while IFS= read -r line; do
+            rows+=("$line")
+        done
+    fi
+
+    for line in "${rows[@]}"; do
+        [[ "$line" == "--" ]] && continue
+        IFS=$'\t' read -ra cols <<< "$line"
+        (( ${#cols[@]} > max_cols )) && max_cols=${#cols[@]}
+        for i in "${!cols[@]}"; do
+            len=$(visible_len "${cols[$i]}")
+            if [[ -z "${widths[$i]}" ]] || (( len > widths[i] )); then
+                widths[$i]=$len
+            fi
+        done
+    done
+
+    local border="+"
+    for ((i=0; i<max_cols; i++)); do
+        border+=$(printf '%*s' "$((widths[i]+2))" '' | tr ' ' '-')"+"
+    done
+
+    local first=1
+    for line in "${rows[@]}"; do
+        [[ "$line" == "--" ]] && continue
+        IFS=$'\t' read -ra cols <<< "$line"
+        printf '|'
+        for ((i=0; i<max_cols; i++)); do
+            cell="${cols[$i]:-}"
+            len=$(visible_len "$cell")
+            printf ' %s%*s |' "$cell" "$((widths[i]-len))" ''
+        done
+        printf '\n'
+        if (( first )); then
+            echo "$border"
+            first=0
+        fi
+    done
+    echo "$border"
+}
+
+# 打印键值对卡片
+# print_kv <key> <value> [key2] [value2] ...
+print_kv() {
+    local max_len=0 i k v len
+    for ((i=1; i<=$#; i+=2)); do
+        k="${!i}"
+        len=$(visible_len "$k")
+        (( len > max_len )) && max_len=$len
+    done
+    for ((i=1; i<=$#; i+=2)); do
+        k="${!i}"
+        local j=$((i+1)); v="${!j}"
+        printf "  ${BOLD}%-${max_len}s${RESET} : %s\n" "$k" "$v"
+    done
+}
+
+# 打印百分比进度条（带颜色）
+print_bar() {
+    local pct="$1" width=30
+    pct=${pct%\%}
+    if ! [[ "$pct" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+        printf "  [%-${width}s] ?\n" ''
+        return
+    fi
+    # 转为整数百分比
+    local ipct; ipct=$(awk -v p="$pct" 'BEGIN{printf "%d", p}')
+    (( ipct > 100 )) && ipct=100
+    local fill=$((width * ipct / 100))
+    local color
+    if   (( ipct < 70 )); then color="$GREEN"
+    elif (( ipct < 90 )); then color="$YELLOW"
+    else                         color="$RED"; fi
+    local bar empty
+    bar=$(printf '%*s' "$fill" '' | tr ' ' '#')
+    empty=$(printf '%*s' "$((width-fill))" '' | tr ' ' '-')
+    printf "  ${color}%s%s${RESET} %s%%\n" "$bar" "$empty" "$ipct"
+}
+
+# 将 KiB/MiB/GiB/TiB 转为 GB（浮点数）
+to_gb() {
+    local s="$1"
+    local num=${s//[a-zA-Z]/}
+    num=${num//,/}
+    local unit=$(echo "$s" | sed 's/^[0-9.,]*//')
+    case "$unit" in
+        Ki|K|k)  awk -v n="$num" 'BEGIN{printf "%.2f", n/1024/1024}' ;;
+        Mi|M)    awk -v n="$num" 'BEGIN{printf "%.2f", n/1024}' ;;
+        Gi|G)    awk -v n="$num" 'BEGIN{printf "%.2f", n}' ;;
+        Ti|T)    awk -v n="$num" 'BEGIN{printf "%.2f", n*1024}' ;;
+        *)       awk -v n="$num" 'BEGIN{printf "%.2f", n}' ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
 # 1. 系统信息
 # ---------------------------------------------------------------------------
 system_info() {
     title "系统信息"
-    if has hostnamectl; then run hostnamectl; else run uname -a; fi
+    local os="$(awk -F= '/^PRETTY_NAME=/{print substr($0, index($0,$2)); exit}' /etc/os-release 2>/dev/null | tr -d '"')"
+    [[ -z "$os" ]] && os="$(uname -o)"
+    local uptime_str=""; uptime_str="$(uptime -p 2>/dev/null || uptime)"
+    local cpu_model="$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//')"
+    local cpu_cores; cpu_cores=$(nproc)
+    local arch="$(uname -m)"
+    local kernel="$(uname -r)"
+
+    print_kv \
+        "操作系统" "$os" \
+        "内核版本" "$kernel" \
+        "系统架构" "$arch" \
+        "运行时间" "$uptime_str" \
+        "CPU 型号" "$cpu_model" \
+        "CPU 核心" "${cpu_cores} 核"
     echo
-    if [[ -f /etc/os-release ]]; then
-        info "发行版:"; grep -E '^(PRETTY_NAME|VERSION)=' /etc/os-release
+
+    if [[ -f /proc/loadavg ]]; then
+        local la1 la5 la15
+        read -r la1 la5 la15 _ < /proc/loadavg
+        info "系统负载 (1/5/15 min):"
+        print_table "负载类型	1分钟	5分钟	15分钟" "系统负载	${la1}	${la5}	${la15}"
     fi
-    echo
-    info "内核版本:";   run uname -r
-    info "运行时间:";   run uptime -p 2>/dev/null || run uptime
-    info "CPU 型号:";   grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ //'
-    info "CPU 核心数:"; nproc
     pause
 }
 
@@ -117,16 +246,43 @@ system_info() {
 # ---------------------------------------------------------------------------
 resource_monitor() {
     title "资源监控"
-    info "内存使用:"; run mem_info
+    info "内存使用概况"
+    local total used free available shared buff_cache
+    read -r _ total used free shared buff_cache available _ < <(
+        free -k | awk 'NR==2{print $1,$2,$3,$4,$5,$6,$7}'
+    )
+    print_table "类型	总量 (GB)	已用 (GB)	可用 (GB)	使用率" \
+                "物理内存	$(to_gb "${total}K")	$(to_gb "${used}K")	$(to_gb "${available}K")	$(awk -v u="$used" -v t="$total" 'BEGIN{printf "%.1f%%", t?u*100/t:0}')"
+    local mem_pct; mem_pct=$(awk -v u="$used" -v t="$total" 'BEGIN{printf "%d", t?u*100/t:0}')
+    print_bar "${mem_pct}"
     echo
-    info "系统负载:"; run uptime
-    echo
-    if ps -eo pid,comm,%cpu,%mem --sort=-%cpu >/dev/null 2>&1; then
-        info "占用 CPU 最高的进程:"; top_proc cpu
-        echo
-        info "占用内存最高的进程:"; top_proc mem
+
+    info "系统负载"
+    if [[ -f /proc/loadavg ]]; then
+        local la1 la5 la15 tasks
+        read -r la1 la5 la15 tasks _ < /proc/loadavg
+        print_table "1分钟	5分钟	15分钟	活跃任务/总数" \
+                    "${la1}	${la5}	${la15}	${tasks}"
     else
-        # BusyBox top 仅能按 CPU 排序，显示一次概览即可
+        run uptime
+    fi
+    echo
+
+    if ps -eo pid,comm,%cpu,%mem --sort=-%cpu >/dev/null 2>&1; then
+        info "占用 CPU 最高的进程"
+        {
+            echo -e "PID\t进程名\tCPU%\t内存%"
+            echo "--"
+            ps -eo pid,comm,%cpu,%mem --sort=-%cpu | head -n 5 | awk 'NR>1 {print $1"\t"$2"\t"$3"\t"$4}'
+        } | print_table
+        echo
+        info "占用内存最高的进程"
+        {
+            echo -e "PID\t进程名\tCPU%\t内存%"
+            echo "--"
+            ps -eo pid,comm,%cpu,%mem --sort=-%mem | head -n 5 | awk 'NR>1 {print $1"\t"$2"\t"$3"\t"$4}'
+        } | print_table
+    else
         info "进程概览 (BusyBox top):"; top -bn1 2>/dev/null | head -n 12 || ps
     fi
     pause
@@ -148,16 +304,48 @@ network_menu() {
 EOF
         read -rp "请选择: " n
         case "$n" in
-            1) title "内网 IP"; run ip_addr; pause ;;
+            1) title "内网 IP"
+               info "接口地址:"
+               ip -o addr show 2>/dev/null | awk '
+                 $3=="inet" || $3=="inet6" {
+                    iface=$2; ip=$4; printf "%s\t%s\n", iface, ip
+                 }' | {
+                     echo -e "接口\t地址"
+                     echo "--"
+                     cat
+                 } | print_table
+               pause ;;
             2) title "公网 IP"
-               if has curl; then run curl -s https://api.ipify.org; echo
-               elif has wget; then run wget -qO- https://api.ipify.org; echo
-               else warn "未安装 curl/wget"; fi; pause ;;
+               local pub=""
+               if has curl; then pub=$(curl -s https://api.ipify.org 2>/dev/null)
+               elif has wget; then pub=$(wget -qO- https://api.ipify.org 2>/dev/null); fi
+               if [[ -n "$pub" ]]; then
+                   info "公网 IPv4:"; print_kv "地址" "$pub"
+               else warn "未安装 curl/wget 或网络不可达"; fi; pause ;;
             3) title "监听端口"
-               if has ss; then run $SUDO ss -tulnp
-               else run $SUDO netstat -tulnp; fi; pause ;;
+               info "正在监听的 TCP/UDP 端口:"
+               if has ss; then
+                   {
+                       echo -e "协议\t本地地址:端口\t状态\t进程"
+                       echo "--"
+                       $SUDO ss -tulnpH 2>/dev/null | awk '
+                         NF >= 6 {
+                            proto=$1; state=$2; local=$5; proc=$0
+                            sub(/.*users:/, "", proc)
+                            sub(/\)/, "", proc)
+                            print proto "\t" local "\t" state "\t" proc
+                         }'
+                   } | print_table
+               else
+                   run $SUDO netstat -tulnp
+               fi; pause ;;
             4) title "连接数统计"
-               if has ss; then run bash -c "ss -s"; else run bash -c "netstat -an | wc -l"; fi; pause ;;
+               if has ss; then
+                   info "按协议统计:"
+                   ss -s 2>/dev/null | sed -n '/TCP:/,/UDP:/p' | sed '$d'
+               else
+                   info "总连接数:"; netstat -an 2>/dev/null | wc -l
+               fi; pause ;;
             5) read -rp "要 ping 的地址 (默认 8.8.8.8): " host
                host="${host:-8.8.8.8}"; run ping -c 4 "$host"; pause ;;
             0) break ;;
@@ -171,10 +359,30 @@ EOF
 # ---------------------------------------------------------------------------
 disk_menu() {
     title "磁盘管理"
-    info "磁盘空间:"; run disk_info
+    info "磁盘空间使用"
+    {
+        echo -e "文件系统\t挂载点\t类型\t总容量\t已用\t可用\t使用率"
+        echo "--"
+        df -hT 2>/dev/null | awk 'NR>1 {
+            type=$2; size=$3; used=$4; avail=$5; pct=$6; mount=$7
+            # 处理 BusyBox df 字段列不同 (没有 -T 时不传类型)
+            if(NF==6) { mount=$6; pct=$5; avail=$4; used=$3; size=$2; type="-" }
+            print $1"\t"mount"\t"type"\t"size"\t"used"\t"avail"\t"pct
+        }'
+    } | print_table
+    # 使用率进度条（针对每个分区）
+    df -h 2>/dev/null | awk 'NR>1 {print $5"\t"$1" ("$6")"}' | while IFS=$'\t' read -r pct mp; do
+        printf "  %-20s " "$mp"
+        print_bar "$pct"
+    done
     echo
-    info "当前目录下占用前 10:"
-    du -sh ./* 2>/dev/null | { sort -rh 2>/dev/null || sort -r; } | head -n 10
+
+    info "当前目录下占用前 10"
+    {
+        echo -e "目录/文件\t大小"
+        echo "--"
+        du -sh ./* 2>/dev/null | { sort -rh 2>/dev/null || sort -r; } | head -n 10 | awk '{print $2"\t"$1}'
+    } | print_table
     echo
     if has lsblk; then info "块设备:"; run lsblk; fi
     pause
@@ -268,10 +476,17 @@ EOF
 # ---------------------------------------------------------------------------
 user_menu() {
     title "用户管理"
-    info "当前登录用户:"; run who
+    info "当前登录用户"
+    {
+        echo -e "用户名\t终端\t登录时间\t来源IP"
+        who 2>/dev/null | awk '{print $1"\t"$2"\t"$3" "$4"\t"$5}'
+    } | print_table
     echo
-    info "普通用户列表 (UID>=1000):"
-    awk -F: '$3>=1000 && $3<65534 {print $1" (uid="$3")"}' /etc/passwd
+    info "普通用户列表 (UID>=1000)"
+    {
+        echo -e "用户名\tUID\t家目录\tShell"
+        awk -F: '$3>=1000 && $3<65534 {print $1"\t"$3"\t"$6"\t"$7}' /etc/passwd
+    } | print_table
     pause
 }
 
