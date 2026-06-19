@@ -137,10 +137,10 @@ linux_info() {
 
     local disk_info
     if has df; then
-        # 使用 -B1 输出字节，避免 BusyBox df 列宽/换行导致字段错位
-        disk_info=$(df -B1 / 2>/dev/null | awk 'NR==2{
-            used=$3; size=$2; pct=$5;
-            printf "%.1fG/%.1fG (%s)", used/1024/1024/1024, size/1024/1024/1024, pct
+        # df 默认输出 1K-blocks，BusyBox/GNU 都支持，字段位置稳定
+        # $2=总量(KB) $3=已用(KB) $5=使用率
+        disk_info=$(df / 2>/dev/null | awk 'NR==2 && NF>=6 {
+            printf "%.1fG/%.1fG (%s)", $3/1024/1024, $2/1024/1024, $5
         }')
     fi
     [[ -z "$disk_info" ]] && disk_info="未知"
@@ -153,7 +153,7 @@ linux_info() {
         isp_info=$(echo "$ipinfo" | awk -F'"' '/"org":/ {print $4; exit}')
     fi
 
-    local load=$(awk '{print $(NF-2), $(NF-1), $NF}' /proc/loadavg)
+    local load=$(awk '{print $1, $2, $3}' /proc/loadavg)
     local dns_addresses=$(awk '/^nameserver/{printf "%s ", $2} END {print ""}' /etc/resolv.conf)
 
     local cpu_arch=$(uname -m)
