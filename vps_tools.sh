@@ -256,8 +256,12 @@ bar() {
     if   (( ipct < 70 )); then color="$GREEN"
     elif (( ipct < 90 )); then color="$YELLOW"
     else                         color="$RED"; fi
-    local bar=$(printf '%*s' "$fill" '' | tr ' ' '█')
-    local empty=$(printf '%*s' "$((width-fill))" '' | tr ' ' '░')
+    local bar_ch='█' empty_ch='░'
+    if [[ "${BOX_H}" == "-" ]]; then
+        bar_ch='#'; empty_ch='-'
+    fi
+    local bar=$(repeat "$fill" "$bar_ch")
+    local empty=$(repeat "$((width-fill))" "$empty_ch")
     [[ -n "$label" ]] && printf "  ${DIM}%s${RESET} " "$label"
     printf "${color}%s%s${RESET} ${BOLD}%3d%%${RESET}\n" "$bar" "$empty" "$ipct"
 }
@@ -313,6 +317,147 @@ to_human() {
         else if(b>=1024) printf "%.2f KB", b/1024;
         else printf "%d B", b;
     }'
+}
+
+# 检测是否为 procps 版 ps（支持 --sort）
+has_procps_ps() {
+    ps -eo pid,comm,%cpu,%mem --sort=-%cpu >/dev/null 2>&1
+}
+
+# 美化时长
+pretty_uptime() {
+    local s=$(awk '{print int($1)}' /proc/uptime 2>/dev/null)
+    local d=$((s/86400)) h=$(((s%86400)/3600)) m=$(((s%3600)/60))
+    local out=""
+    ((d>0)) && out+="${d}天 "
+    ((h>0)) && out+="${h}时 "
+    ((m>0)) && out+="${m}分"
+    echo "${out:-少于1分钟}"
+}
+
+# 从 /proc/cpuinfo 取 CPU 频率
+cpu_mhz() {
+    local mhz=$(awk '/^cpu MHz/{print $4; exit}' /proc/cpuinfo 2>/dev/null)
+    if [[ -n "$mhz" ]]; then
+        awk -v m="$mhz" 'BEGIN{printf "%.1f GHz", m/1000}'
+    else
+        echo "-"
+    fi
+}
+
+# TCP/UDP 连接数
+tcp_udp_count() {
+    local tcp=0 udp=0
+    if [[ -f /proc/net/tcp ]]; then
+        tcp=$(awk 'NR>1 {count++} END{print count+0}' /proc/net/tcp)
+    fi
+    if [[ -f /proc/net/udp ]]; then
+        udp=$(awk 'NR>1 {count++} END{print count+0}' /proc/net/udp)
+    fi
+    echo "${tcp}|${udp}"
+}
+
+# 总网络流量（所有接口累加）
+total_traffic() {
+    local dir="$1" total=0
+    for f in /sys/class/net/*/statistics/${dir}_bytes; do
+        [[ -f "$f" ]] && total=$((total + $(cat "$f")))
+    done
+    to_human "$total"
+}
+
+# 网络拥塞算法
+net_algo() {
+    sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "-"
+}
+
+# 通过外部 API 获取 IP 信息
+ip_info() {
+    local ip="" org="" city="" country="" dns=""
+    if has curl; then
+        ip=$(curl -s --max-time 6 https://api.ipify.org 2>/dev/null)
+    elif has wget; then
+        ip=$(wget -qO- https://api.ipify.org 2>/dev/null)
+    fi
+    [[ -z "$ip" ]] && { echo ""; return; }
+
+    local json
+    if has curl; then
+        json=$(curl -s --max-time 6 "https://ipinfo.io/${ip}/json" 2>/dev/null)
+    elif has wget; then
+        json=$(wget -qO- "https://ipinfo.io/${ip}/json" 2>/dev/null)
+    fi
+    org=$(echo "$json" | awk -F'"' '/"org":/{print $4}')
+    city=$(echo "$json" | awk -F'"' '/"city":/{print $4}')
+    country=$(echo "$json" | awk -F'"' '/"country":/{print $4}')
+
+    # DNS
+    if has resolvectl; then
+        dns=$(resolvectl dns 2>/dev/null | awk '{print $NF}' | head -n1)
+    elif [[ -f /etc/resolv.conf ]]; then
+        dns=$(awk '/^nameserver/{print $2; exit}' /etc/resolv.conf)
+    fi
+
+    echo -e "运营商\t${org:-未知}\nIPv4地址\t${ip}\nDNS地址\t${dns:-未知}\n地理位置\t${country:-未知} ${city:-未知}"
+}
+
+# 按参考图风格打印信息
+sysinfo_query() {
+    section "系统信息查询"
+
+    local host=$(hostname 2>/dev/null || echo 'localhost')
+    local os=$(awk -F= '/^PRETTY_NAME=/{gsub(/"/, "", $2); print $2; exit}' /etc/os-release 2>/dev/null)
+    [[ -z "$os" ]] && os=$(uname -o)
+    local cpu_model=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//')
+    local cpu_cores=$(nproc)
+    local cpu_freq=$(cpu_mhz)
+    local cpu_pct=$(cpu_usage)
+    local load=$(awk '{print $1", "$2", "$3}' /proc/loadavg)
+    local tcpudp=$(tcp_udp_count)
+    local mem_total mem_used mem_pct swap_total swap_used swap_pct
+    read -r _ mem_total mem_used _ _ _ mem_avail _ < <(free -m | awk 'NR==2{print}')
+    mem_pct=$(awk -v u="$mem_used" -v t="$mem_total" 'BEGIN{printf "%.2f", t?u*100/t:0}')
+    read -r _ swap_total swap_used _ < <(free -m | awk 'NR==3{print $1,$2,$3}')
+    swap_pct=$(awk -v u="$swap_used" -v t="$swap_total" 'BEGIN{printf "%.2f", t?u*100/t:0}')
+    local rx=$(total_traffic "rx")
+    local tx=$(total_traffic "tx")
+    local algo=$(net_algo)
+    local up=$(pretty_uptime)
+
+    # 硬盘：根分区
+    local disk_used disk_total disk_mount
+    read -r disk_total disk_used _ _ disk_mount _ < <(df -h / 2>/dev/null | awk 'NR==2{print $2,$3,$4,$5,$6,$7}')
+
+    # 输出：参考图风格
+    printf '  ${CYAN}%-14s${RESET} %s\n' "主机名:" "$host"
+    printf '  ${CYAN}%-14s${RESET} %s\n' "系统版本:" "$os"
+    printf '  ${CYAN}%-14s${RESET} %s\n' "Linux版本:" "$(uname -r)"
+    printf '  ${CYAN}%-14s${RESET} %s\n' "CPU架构:" "$(uname -m)"
+    printf '  ${CYAN}%-14s${RESET} %s\n' "CPU型号:" "$cpu_model"
+    printf '  ${CYAN}%-14s${RESET} %s\n' "CPU核心数:" "${cpu_cores}"
+    printf '  ${CYAN}%-14s${RESET} %s\n' "CPU频率:" "$cpu_freq"
+    printf '  ${CYAN}%-14s${RESET} %s\n' "CPU占用:" "${cpu_pct}%"
+    printf '  ${CYAN}%-14s${RESET} %s\n' "系统负载:" "$load"
+    printf '  ${CYAN}%-14s${RESET} %s\n' "TCP|UDP连接数:" "$tcpudp"
+    printf '  ${CYAN}%-14s${RESET} %s\n' "物理内存:" "${mem_used}M/${mem_total}M (${mem_pct}%)"
+    printf '  ${CYAN}%-14s${RESET} %s\n' "虚拟内存:" "${swap_used}M/${swap_total}M (${swap_pct}%)"
+    printf '  ${CYAN}%-14s${RESET} %s\n' "硬盘占用:" "${disk_used}/${disk_total} (${disk_mount})"
+    printf '  ${CYAN}%-14s${RESET} %s\n' "总接收:" "$rx"
+    printf '  ${CYAN}%-14s${RESET} %s\n' "总发送:" "$tx"
+    printf '  ${CYAN}%-14s${RESET} %s\n' "网络算法:" "$algo"
+
+    # IP 信息
+    local ipi=$(ip_info)
+    if [[ -n "$ipi" ]]; then
+        echo
+        while IFS=$'\t' read -r k v; do
+            printf '  ${CYAN}%-14s${RESET} %s\n' "$k" "$v"
+        done <<< "$ipi"
+    fi
+
+    printf '  ${CYAN}%-14s${RESET} %s\n' "系统时间:" "$(date '+%Y-%m-%d %I:%M %p %Z')"
+    printf '  ${CYAN}%-14s${RESET} %s\n' "运行时长:" "$up"
+    pause
 }
 
 # ---------------------------------------------------------------------------
@@ -378,12 +523,15 @@ dashboard() {
 
     # Top 进程
     subtitle "Top 进程"
-    local -a prows=($'PID\t进程\tCPU%\tMEM%')
-    while IFS=$'\t' read -r p c m u; do
-        prows+=("$p"$'\t'"$c"$'\t'"$m"$'\t'"$u")
-    done < <(ps -eo pid,comm:20,%cpu,%mem --sort=-%cpu | awk 'NR>1&& NR<=7 && $2!="ps" && $2!="awk" {print $1"\t"$2"\t"$3"\t"$4}')
-    table R L R R "${prows[@]}"
-
+    if has_procps_ps; then
+        local -a prows=($'PID\t进程\tCPU%\tMEM%')
+        while IFS=$'\t' read -r p c m u; do
+            prows+=("$p"$'\t'"$c"$'\t'"$m"$'\t'"$u")
+        done < <(ps -eo pid,comm:20,%cpu,%mem --sort=-%cpu | awk 'NR>1&& NR<=7 && $2!="ps" && $2!="awk" {print $1"\t"$2"\t"$3"\t"$4}')
+        table R L R R "${prows[@]}"
+    else
+        top -bn1 2>/dev/null | head -n 12 || ps
+    fi
     pause
 }
 
@@ -439,7 +587,7 @@ resource_monitor() {
         "活跃任务" "$tasks"
 
     subtitle "进程排行"
-    if ps -eo pid,comm,%cpu,%mem --sort=-%cpu >/dev/null 2>&1; then
+    if has_procps_ps; then
         local -a topcpu=($'PID\t进程\tCPU%\tMEM%')
         while IFS=$'\t' read -r p c m u; do
             topcpu+=("$p"$'\t'"$c"$'\t'"$m"$'\t'"$u")
@@ -1074,8 +1222,9 @@ main_menu() {
    ${GREEN}9.${RESET} 系统更新
    ${GREEN}10.${RESET} 进阶工具 (SSH加固 / Swap / BBR / Docker)
    ${GREEN}11.${RESET} 仪表盘 (一屏总览)
+   ${GREEN}12.${RESET} 系统信息查询
 EOF
-        (( IS_ALPINE )) && echo -e "   ${GREEN}12.${RESET} Alpine 专属工具"
+        (( IS_ALPINE )) && echo -e "   ${GREEN}13.${RESET} Alpine 专属工具"
         echo -e "   ${GREEN}0.${RESET} 退出"
         echo
         read -rp "请输入选项: " choice
@@ -1091,7 +1240,8 @@ EOF
             9) system_update ;;
             10) advanced_menu ;;
             11) dashboard ;;
-            12) alpine_menu ;;
+            12) sysinfo_query ;;
+            13) alpine_menu ;;
             0) info "再见!"; exit 0 ;;
             *) err "无效选项"; sleep 1 ;;
         esac
