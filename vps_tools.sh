@@ -43,8 +43,11 @@ ip_address() {
         fi
     }
 
-    public_ip=$(get_public_ip)
-    isp_info=$(http_get "http://ipinfo.io/org" 3)
+    # 只请求一次 ipinfo.io/json: ip/isp 供此函数判断, country/city 供 linux_info 复用
+    ipinfo=$(http_get "https://ipinfo.io/json" 5)
+    public_ip=$(echo "$ipinfo" | awk -F'"' '/"ip":/{print $4; exit}')
+    [[ -z "$public_ip" ]] && public_ip=$(get_public_ip)   # json 失败时回退单独取 ip
+    isp_info=$(echo "$ipinfo" | awk -F'"' '/"org":/{print $4; exit}')
 
     if echo "$isp_info" | grep -Eiq 'CHINANET|mobile|unicom|telecom'; then
         ipv4_address=$(get_local_ip)
@@ -102,7 +105,8 @@ count_connections() {
 # 读取 sysctl 值，无 sysctl 命令时直接读 /proc/sys
 read_sysctl() {
     local key="$1"
-    local path="/proc/sys/${key//./\/.}"
+    # 把 "a.b.c" 转成 "a/b/c": 用 ${key//./\/} (注意不是 /., 旧写法多塞了点导致路径失效)
+    local path="/proc/sys/${key//./\/}"
     if has sysctl; then
         sysctl -n "$key" 2>/dev/null
     elif [[ -f "$path" ]]; then
@@ -125,7 +129,7 @@ linux_info() {
     fi
 
     local cpu_usage_percent
-    cpu_usage_percent=$(awk '{u=$2+$4; t=$2+$4+$5; if (NR==1){u1=u; t1=t;} else printf "%.0f\n", (($2+$4-u1) * 100 / (t-t1))}' \
+    cpu_usage_percent=$(awk '{u=$2+$4; t=$2+$4+$5; if (NR==1){u1=u; t1=t;} else {d=t-t1; if (d>0) printf "%.0f\n", (($2+$4-u1) * 100 / d); else print 0}}' \
         <(grep '^cpu ' /proc/stat) <(sleep 1; grep '^cpu ' /proc/stat))
 
     local cpu_cores=$(nproc)
@@ -136,18 +140,13 @@ linux_info() {
     local mem_info=$(free -b | awk 'NR==2{printf "%.2f/%.2fM (%.2f%%)", $3/1024/1024, $2/1024/1024, $3*100/$2}')
 
     local disk_info
-    if has df; then
-        # df 默认输出 1K-blocks，BusyBox/GNU 都支持，字段位置稳定
-        # $2=总量(KB) $3=已用(KB) $5=使用率
-        disk_info=$(df / 2>/dev/null | awk 'NR==2 && NF>=6 {
-            printf "%.1fG/%.1fG (%s)", $3/1024/1024, $2/1024/1024, $5
-        }')
-    fi
+    # 参考 kejilion: 按挂载点 "/" 匹配(而非设备名 /dev/sd*), ZFS/Incus/overlay 均可识别
+    # 从右往左取列以兼容 BusyBox 长设备名折行: 已用=$(NF-3) 总量=$(NF-4) 使用率=$(NF-1)
+    disk_info=$(df -h 2>/dev/null | awk '$NF=="/"{printf "%s/%s (%s)", $(NF-3), $(NF-4), $(NF-1)}')
     [[ -z "$disk_info" ]] && disk_info="未知"
 
-    local ipinfo country city isp_info
-    ipinfo=$(http_get "https://ipinfo.io/json" 5)
-    if [[ -n "$ipinfo" ]]; then
+    local country city isp_info
+    if [[ -n "$ipinfo" ]]; then      # 复用 ip_address() 已取的全局 ipinfo, 不再重复请求
         country=$(echo "$ipinfo" | awk -F'"' '/"country":/ {print $4; exit}')
         city=$(echo "$ipinfo" | awk -F'"' '/"city":/ {print $4; exit}')
         isp_info=$(echo "$ipinfo" | awk -F'"' '/"org":/ {print $4; exit}')
