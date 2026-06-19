@@ -31,7 +31,7 @@ ip_address() {
 
         # 方法2：从 /proc/net/dev + /proc/net/route 推断
         local iface
-        iface=$(awk 'NR>2 && $2=="00000000" {print $1; exit}' /proc/net/route 2>/dev/null | tr -d ':')
+        iface=$(awk 'NR>1 && $2=="00000000" {print $1; exit}' /proc/net/route 2>/dev/null | tr -d ':')
         if [[ -n "$iface" ]]; then
             ip=$(ip -4 addr show "$iface" 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -n1)
             [[ -n "$ip" ]] && { echo "$ip"; return; }
