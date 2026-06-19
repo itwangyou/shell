@@ -52,6 +52,14 @@ detect_init
 
 IS_ALPINE=0; [[ -f /etc/alpine-release ]] && IS_ALPINE=1
 
+# 重复字符串 n 次（避免 tr 对 Unicode 处理异常）
+repeat() {
+    local n="$1" ch="$2" out=""
+    local i
+    for ((i=0; i<n; i++)); do out+="$ch"; done
+    echo -n "$out"
+}
+
 # 根据 locale 选择表格字符（UTF-8 用 box-drawing，否则 ASCII）
 if [[ "${LANG,,}" == *utf-8* || "${LANG,,}" == *utf8* || \
       "${LC_ALL,,}" == *utf-8* || "${LC_ALL,,}" == *utf8* ]]; then
@@ -59,11 +67,15 @@ if [[ "${LANG,,}" == *utf-8* || "${LANG,,}" == *utf8* || \
     BOX_ML='├'; BOX_MM='┼'; BOX_MR='┤'
     BOX_BL='└'; BOX_BM='┴'; BOX_BR='┘'
     BOX_H='─'; BOX_V='│'
+    BANNER_TOP='┌'$(repeat 42 '─')'┐'; BANNER_BOT='└'$(repeat 42 '─')'┘'
+    BANNER_V='│'
 else
     BOX_TL='+'; BOX_TM='+'; BOX_TR='+'
     BOX_ML='+'; BOX_MM='+'; BOX_MR='+'
     BOX_BL='+'; BOX_BM='+'; BOX_BR='+'
     BOX_H='-'; BOX_V='|'
+    BANNER_TOP='+'$(repeat 42 '-')'+'; BANNER_BOT='+'$(repeat 42 '-')'+'
+    BANNER_V='|'
 fi
 
 # ---------------------------------------------------------------------------
@@ -128,13 +140,13 @@ table() {
     for ((i=0; i<max_cols; i++)); do
         [[ -z "${aligns[$i]}" ]] && aligns[$i]="L"
         [[ -z "${widths[$i]}" ]] && widths[$i]=3
-        # 最大列宽上限，避免超长
-        if (( widths[i] > 60 )); then widths[$i]=60; fi
+        # 最大列宽上限
+        if (( widths[i] > 45 )); then widths[$i]=45; fi
     done
 
     local top="${BOX_TL}" mid="${BOX_ML}" bot="${BOX_BL}"
     for ((i=0; i<max_cols; i++)); do
-        local pad=$(printf '%*s' "$((widths[i]+2))" '' | tr ' ' "${BOX_H}")
+        local pad=$(repeat "$((widths[i]+2))" "${BOX_H}")
         top+="${pad}"; mid+="${pad}"; bot+="${pad}"
         if (( i < max_cols-1 )); then
             top+="${BOX_TM}"; mid+="${BOX_MM}"; bot+="${BOX_BM}"
@@ -144,16 +156,16 @@ table() {
     done
 
     echo "$top"
-    local first=1 zebra=0
+    local first=1
     for line in "${rows[@]}"; do
         [[ "$line" == "--" ]] && continue
         IFS=$'\t' read -ra cols <<< "$line"
         if (( first )); then
+            printf '%s' "${BOLD}${BOX_V}"
             first=0
         else
-            (( zebra++ % 2 == 0 )) && echo -en "${DIM}"
+            printf '%s' "${BOX_V}"
         fi
-        printf '%s' "${BOX_V}"
         for ((i=0; i<max_cols; i++)); do
             cell="${cols[$i]:-}"
             cell=$(trunc "$cell" "${widths[$i]}")
@@ -177,7 +189,7 @@ table() {
     echo "$bot"
 }
 
-# 键值对列表
+# 键值对（无边框，用于简单信息）
 kv() {
     local max=0 i k v
     for ((i=1; i<=$#; i+=2)); do
@@ -188,25 +200,53 @@ kv() {
     for ((i=1; i<=$#; i+=2)); do
         k="${!i}"
         local j=$((i+1)); v="${!j}"
-        printf "  ${CYAN}%-${max}s${RESET}  ${DIM}│${RESET}  %s\n" "$k" "$v"
+        printf "  ${CYAN}%-${max}s${RESET} ${DIM}│${RESET} %s\n" "$k" "$v"
     done
 }
 
-# 居中大标题
+# 居中大标题（带圆角边框）
 section() {
-    local txt=" $* " len=${#txt} pad=$(( (TERM_W - len) / 2 ))
-    printf '\n'
-    printf '%*s' "$pad" '' | tr ' ' '='
-    printf '%s' "${BOLD}${CYAN}${txt}${RESET}"
-    printf '%*s\n' "$(( TERM_W - pad - len ))" '' | tr ' ' '='
+    local txt=" $* " len=${#txt}
+    local pad=$(( (TERM_W - len - 4) / 2 ))
+    (( pad < 2 )) && pad=2
+    local side=$(( TERM_W - pad * 2 - len - 4 ))
+    local left=$(repeat "$pad" "${BOX_H}")
+    local right=$(repeat "$side" "${BOX_H}")
+    printf '\n  %s%s%s%s%s%s%s\n' "${BOX_TL}" "$left" "${BOX_H}${BOX_H}" "${BOLD}${txt}${RESET}" "${BOX_H}${BOX_H}" "$right" "${BOX_TR}"
 }
 
 # 小标题
-subtitle() { echo -e "\n${BOLD}$*${RESET}"; }
+subtitle() { printf "\n  ${BOLD}${CYAN}▸ %s${RESET}\n" "$*"; }
+
+# 带边框的 KV 卡片
+kv_card() {
+    local max_k=0 i k v
+    for ((i=1; i<=$#; i+=2)); do
+        k="${!i}"
+        local l=$(vlen "$k")
+        (( l > max_k )) && max_k=$l
+    done
+    local inner=$(( max_k + 3 + 40 ))
+    local total=$(( inner + 4 ))
+    (( total > TERM_W - 4 )) && total=$(( TERM_W - 4 ))
+    local hr=$(repeat "$((total-2))" "${BOX_H}")
+
+    printf '  %s%s%s\n' "${BOX_TL}" "$hr" "${BOX_TR}"
+    for ((i=1; i<=$#; i+=2)); do
+        k="${!i}"
+        local j=$((i+1)); v="${!j}"
+        local line
+        printf -v line ' %-*s %s %s' "$max_k" "$k" "${BOX_V}" "$v"
+        local pad=$(( total - 2 - $(vlen "$line") ))
+        (( pad < 0 )) && pad=0
+        printf '  %s%s%*s%s\n' "${BOX_V}" "$line" "$pad" '' "${BOX_V}"
+    done
+    printf '  %s%s%s\n' "${BOX_BL}" "$hr" "${BOX_BR}"
+}
 
 # 进度条
 bar() {
-    local pct="$1" label="${2:-}" width=32
+    local pct="$1" label="${2:-}" width=28
     pct=${pct%\%}
     [[ "$pct" =~ ^[0-9]+(\.[0-9]+)?$ ]] || pct=0
     local ipct=$(awk -v p="$pct" 'BEGIN{printf "%d", p}')
@@ -216,10 +256,10 @@ bar() {
     if   (( ipct < 70 )); then color="$GREEN"
     elif (( ipct < 90 )); then color="$YELLOW"
     else                         color="$RED"; fi
-    local bar=$(printf '%*s' "$fill" '' | tr ' ' '#')
-    local empty=$(printf '%*s' "$((width-fill))" '' | tr ' ' '-')
-    [[ -n "$label" ]] && printf '  %-18s ' "$label"
-    printf "${color}%s%s${RESET} %3d%%\n" "$bar" "$empty" "$ipct"
+    local bar=$(printf '%*s' "$fill" '' | tr ' ' '█')
+    local empty=$(printf '%*s' "$((width-fill))" '' | tr ' ' '░')
+    [[ -n "$label" ]] && printf "  ${DIM}%s${RESET} " "$label"
+    printf "${color}%s%s${RESET} ${BOLD}%3d%%${RESET}\n" "$bar" "$empty" "$ipct"
 }
 
 # 单位换算为 GB
@@ -239,6 +279,114 @@ to_gb() {
 # 安全百分比
 pct_of() { awk -v a="$1" -v b="$2" 'BEGIN{printf "%d", b?a*100/b:0}'; }
 
+# 计算 CPU 总占用率（基于 /proc/stat）
+cpu_usage() {
+    local a1 b1 c1 d1 e1 f1 g1 idle1 total1
+    local a2 b2 c2 d2 e2 f2 g2 idle2 total2
+    read -r _ a1 b1 c1 d1 e1 f1 g1 _ < /proc/stat
+    idle1=$((d1))
+    total1=$((a1+b1+c1+d1+e1+f1+g1))
+    sleep 0.5
+    read -r _ a2 b2 c2 d2 e2 f2 g2 _ < /proc/stat
+    idle2=$((d2))
+    total2=$((a2+b2+c2+d2+e2+f2+g2))
+    awk -v i1="$idle1" -v t1="$total1" -v i2="$idle2" -v t2="$total2" \
+        'BEGIN{d=t2-t1; if(d>0) printf "%d", (d-(i2-i1))*100/d; else print 0}'
+}
+
+# 读取网络接口流量（单位换算）
+iface_traffic() {
+    local iface="$1" dir="$2"
+    local f="/sys/class/net/$iface/statistics/${dir}_bytes"
+    [[ -f "$f" ]] || { echo "0"; return; }
+    local bytes=$(cat "$f")
+    to_human "$bytes"
+}
+
+# 将字节转为人类可读
+to_human() {
+    local b="$1"
+    awk -v b="$b" 'BEGIN{
+        if(b>=1099511627776) printf "%.2f TB", b/1099511627776;
+        else if(b>=1073741824) printf "%.2f GB", b/1073741824;
+        else if(b>=1048576) printf "%.2f MB", b/1048576;
+        else if(b>=1024) printf "%.2f KB", b/1024;
+        else printf "%d B", b;
+    }'
+}
+
+# ---------------------------------------------------------------------------
+# 0. 仪表盘
+# ---------------------------------------------------------------------------
+dashboard() {
+    section "仪表盘"
+
+    # CPU
+    subtitle "CPU"
+    local cpu_pct=$(cpu_usage)
+    local cpu_model="$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//')"
+    printf "  ${DIM}%s${RESET}\n" "$cpu_model"
+    bar "$cpu_pct" "CPU 使用率"
+
+    # 内存
+    subtitle "内存"
+    local total used avail
+    read -r _ total used _ _ _ avail _ < <(free -k | awk 'NR==2{print}')
+    local mem_pct=$(pct_of "$used" "$total")
+    local used_h=$(to_human "$(($used*1024))")
+    local total_h=$(to_human "$(($total*1024))")
+    local avail_h=$(to_human "$(($avail*1024))")
+    printf "  ${DIM}%s / %s${RESET}   可用: ${GREEN}%s${RESET}\n" "$used_h" "$total_h" "$avail_h"
+    bar "$mem_pct" "内存使用率"
+
+    # 负载
+    subtitle "系统负载"
+    local a b c tasks; read -r a b c tasks _ < /proc/loadavg
+    local cores=$(nproc)
+    local la_pct=$(awk -v a="$a" -v c="$cores" 'BEGIN{printf "%d", a*100/c}')
+    printf "  ${DIM}1m:${RESET} %s   ${DIM}5m:${RESET} %s   ${DIM}15m:${RESET} %s   ${DIM}任务:${RESET} %s\n" "$a" "$b" "$c" "$tasks"
+    bar "$la_pct" "负载 / 核心数"
+
+    # 磁盘
+    subtitle "磁盘"
+    while IFS=$'\t' read -r mount size used avail pct; do
+        bar "$pct" "$mount"
+    done < <(df -h 2>/dev/null | awk 'NR>1 && $1 !~ /^overlay|tmpfs|devtmpfs$/ {gsub(/%/,"",$5); print $6"\t"$2"\t"$3"\t"$4"\t"$5}' | head -n 5)
+
+    # 网络
+    subtitle "网络接口"
+    local pub=""
+    if has curl; then pub=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null)
+    elif has wget; then pub=$(wget -qO- https://api.ipify.org 2>/dev/null); fi
+    [[ -n "$pub" ]] && printf "  ${DIM}公网 IP:${RESET} %s\n" "$pub"
+
+    local -a nrows=($'接口\tIPv4\t接收\t发送')
+    declare -A ip4
+    while IFS=$'\t' read -r iface ip fam; do
+        [[ "$fam" == "IPv4" ]] && ip4[$iface]="$ip"
+    done < <(ip -o addr show 2>/dev/null | awk '$3=="inet" {print $2"\t"$4"\t""IPv4"}')
+    local r
+    for iface in /sys/class/net/*; do
+        iface=$(basename "$iface")
+        [[ "$iface" == "lo" ]] && continue
+        local rx=$(iface_traffic "$iface" "rx")
+        local tx=$(iface_traffic "$iface" "tx")
+        printf -v r '%s\t%s\t%s\t%s' "$iface" "${ip4[$iface]:-—}" "$rx" "$tx"
+        nrows+=("$r")
+    done
+    table L L R R "${nrows[@]}"
+
+    # Top 进程
+    subtitle "Top 进程"
+    local -a prows=($'PID\t进程\tCPU%\tMEM%')
+    while IFS=$'\t' read -r p c m u; do
+        prows+=("$p"$'\t'"$c"$'\t'"$m"$'\t'"$u")
+    done < <(ps -eo pid,comm:20,%cpu,%mem --sort=-%cpu | awk 'NR>1&& NR<=7 && $2!="ps" && $2!="awk" {print $1"\t"$2"\t"$3"\t"$4}')
+    table R L R R "${prows[@]}"
+
+    pause
+}
+
 # ---------------------------------------------------------------------------
 # 1. 系统信息
 # ---------------------------------------------------------------------------
@@ -248,9 +396,9 @@ system_info() {
     [[ -z "$os" ]] && os="$(uname -o)"
     local up="$(uptime -p 2>/dev/null || uptime)"
     local cpu="$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//')"
+    local a b c; read -r a b c _ < /proc/loadavg
 
-    subtitle "基础信息"
-    kv \
+    kv_card \
         "操作系统" "$os" \
         "内核版本" "$(uname -r)" \
         "系统架构" "$(uname -m)" \
@@ -258,15 +406,8 @@ system_info() {
         "CPU 型号" "$cpu" \
         "CPU 核心" "$(nproc) 核" \
         "包管理器" "$PKG" \
-        "Init 系统" "$INIT"
-
-    if [[ -f /proc/loadavg ]]; then
-        local a b c; read -r a b c _ < /proc/loadavg
-        subtitle "系统负载"
-        table R R R \
-            $'1分钟\t5分钟\t15分钟' \
-            "${a}"$'\t'"${b}"$'\t'"${c}"
-    fi
+        "Init 系统" "$INIT" \
+        "系统负载" "$a / $b / $c"
     pause
 }
 
@@ -278,38 +419,40 @@ resource_monitor() {
     local total used free avail
     read -r _ total used free _ _ avail _ < <(free -k | awk 'NR==2{print}')
     local used_gb=$(to_gb "${used}K")
-    local free_gb=$(to_gb "${free}K")
     local avail_gb=$(to_gb "${avail}K")
     local total_gb=$(to_gb "${total}K")
     local mem_pct=$(pct_of "$used" "$total")
 
     subtitle "内存使用"
-    table L R R R R \
-        $'类型\t总量\t已用\t可用\t使用率' \
-        $'物理内存\t'"${total_gb} GB"$'\t'"${used_gb} GB"$'\t'"${avail_gb} GB"$'\t'"${mem_pct}%"
-    bar "$mem_pct" "内存"
+    kv_card \
+        "总量" "${total_gb} GB" \
+        "已用" "${used_gb} GB (${mem_pct}%)" \
+        "可用" "${avail_gb} GB"
+    bar "$mem_pct" "内存使用率"
 
     subtitle "系统负载"
     local a b c tasks; read -r a b c tasks _ < /proc/loadavg
-    table R R R L \
-        $'1分钟\t5分钟\t15分钟\t活跃任务' \
-        $''"${a}"$'\t'"${b}"$'\t'"${c}"$'\t'"${tasks}"
+    kv_card \
+        "1分钟" "$a" \
+        "5分钟" "$b" \
+        "15分钟" "$c" \
+        "活跃任务" "$tasks"
 
     subtitle "进程排行"
     if ps -eo pid,comm,%cpu,%mem --sort=-%cpu >/dev/null 2>&1; then
-        local -a topcpu=($'PID\t进程名\tCPU%\t内存%')
+        local -a topcpu=($'PID\t进程\tCPU%\tMEM%')
         while IFS=$'\t' read -r p c m u; do
             topcpu+=("$p"$'\t'"$c"$'\t'"$m"$'\t'"$u")
         done < <(ps -eo pid,comm:20,%cpu,%mem --sort=-%cpu | awk 'NR>1{print $1"\t"$2"\t"$3"\t"$4}' | head -n 6)
 
-        local -a topmem=($'PID\t进程名\tCPU%\t内存%')
+        local -a topmem=($'PID\t进程\tCPU%\tMEM%')
         while IFS=$'\t' read -r p c m u; do
             topmem+=("$p"$'\t'"$c"$'\t'"$m"$'\t'"$u")
         done < <(ps -eo pid,comm:20,%cpu,%mem --sort=-%mem | awk 'NR>1{print $1"\t"$2"\t"$3"\t"$4}' | head -n 6)
 
-        echo -e "\n${DIM}CPU 占用最高:${RESET}"
+        echo
         table R L R R "${topcpu[@]}"
-        echo -e "\n${DIM}内存占用最高:${RESET}"
+        echo
         table R L R R "${topmem[@]}"
     else
         top -bn1 2>/dev/null | head -n 12 || ps
@@ -335,22 +478,38 @@ EOF
         case "$n" in
             1)
                 section "内网 IP"
-                local -a rows=($'接口\t地址\t族')
+                local -a rows=($'接口\tIPv4 地址\tIPv6 地址')
                 local r
+                declare -A iface4 iface6
                 while IFS=$'\t' read -r iface ip fam; do
-                    printf -v r '%s\t%s\t%s' "$iface" "$ip" "$fam"
-                    rows+=("$r")
+                    if [[ "$fam" == "IPv4" ]]; then
+                        [[ -n "${iface4[$iface]}" ]] && iface4[$iface]+=", "
+                        iface4[$iface]+="$ip"
+                    else
+                        [[ -n "${iface6[$iface]}" ]] && iface6[$iface]+=", "
+                        iface6[$iface]+="$ip"
+                    fi
                 done < <(ip -o addr show 2>/dev/null | awk '
                     $3=="inet"  {print $2 "\t" $4 "\tIPv4"}
                     $3=="inet6" {print $2 "\t" $4 "\tIPv6"}')
-                table L L C "${rows[@]}"
+                for iface in "${!iface4[@]}" "${!iface6[@]}"; do
+                    [[ -n "${seen[$iface]}" ]] && continue
+                    seen[$iface]=1
+                    printf -v r '%s\t%s\t%s' "$iface" "${iface4[$iface]:-—}" "${iface6[$iface]:-—}"
+                    rows+=("$r")
+                done
+                table L L L "${rows[@]}"
                 pause ;;
             2)
                 section "公网 IP"
                 local pub=""
                 if has curl; then pub=$(curl -s --max-time 8 https://api.ipify.org 2>/dev/null)
                 elif has wget; then pub=$(wget -qO- https://api.ipify.org 2>/dev/null); fi
-                [[ -n "$pub" ]] && kv "IPv4" "$pub" || err "获取失败"
+                if [[ -n "$pub" ]]; then
+                    kv_card "公网 IPv4" "$pub"
+                else
+                    err "获取失败"
+                fi
                 pause ;;
             3)
                 section "监听端口"
@@ -363,9 +522,20 @@ EOF
                     done < <($SUDO ss -tulnpH 2>/dev/null | awk '
                         NF>=6 {
                             proto=$1; state=$2; local=$5; proc=$0
-                            sub(/.*users:/, "", proc); gsub(/\)/, "", proc)
-                            gsub(/^\(\("/, "", proc); gsub(/"/, "", proc)
-                            n=split(local, a, ":"); port=a[n]; addr=local; sub(":" port "$", "", addr)
+                            sub(/.*users:/, "", proc)
+                            gsub(/\)/, "", proc)
+                            gsub(/^\(\("/, "", proc)
+                            gsub(/"/, "", proc)
+                            # 只保留进程名，去掉 fd
+                            n=split(proc, b, ","); proc=b[1]
+                            # 拆分地址和端口（兼容 IPv6）
+                            if (local ~ /^\[/) {
+                                match(local, /\[([^]]+)\]:([0-9]+)/, m)
+                                addr=m[1]; port=m[2]
+                            } else {
+                                n=split(local, a, ":"); port=a[n]
+                                addr=local; sub(":" port "$", "", addr)
+                            }
                             print proto "\t" addr "\t" port "\t" state "\t" proc
                         }' | head -n 30)
                     table L L R C L "${rows[@]}"
@@ -376,7 +546,17 @@ EOF
             4)
                 section "连接统计"
                 if has ss; then
-                    ss -s 2>/dev/null | sed -n '/TCP:/,/UDP:/p' | sed '$d'
+                    local -a rows=($'协议\t连接数')
+                    local tcp total
+                    tcp=$(ss -s 2>/dev/null | awk '/TCP:/{print $2}' | tr -d ',')
+                    total=$(ss -s 2>/dev/null | awk '/TCP:/{getline; print $2}' | tr -d ',' 2>/dev/null)
+                    [[ -n "$tcp" ]] && rows+=("TCP"$'\t'"$tcp")
+                    [[ -n "$total" ]] && rows+=("总计"$'\t'"$total")
+                    if (( ${#rows[@]} > 1 )); then
+                        table L R "${rows[@]}"
+                    else
+                        ss -s 2>/dev/null | sed -n '/TCP:/,/UDP:/p' | sed '$d'
+                    fi
                 else
                     info "总连接数"; netstat -an 2>/dev/null | wc -l
                 fi
@@ -399,19 +579,19 @@ disk_menu() {
     section "磁盘管理"
 
     subtitle "磁盘空间"
-    local -a rows=($'文件系统\t挂载点\t类型\t总量\t已用\t可用\t使用率')
+    local -a rows=($'挂载点\t文件系统\t总量\t已用\t可用\t使用率')
     local row
     while IFS=$'\t' read -r fs mount type size used avail pct; do
-        printf -v row '%s\t%s\t%s\t%s\t%s\t%s\t%s' "$fs" "$mount" "$type" "$size" "$used" "$avail" "$pct"
+        printf -v row '%s\t%s\t%s\t%s\t%s\t%s' "$mount" "$fs" "$size" "$used" "$avail" "$pct"
         rows+=("$row")
-    done < <(df -hT 2>/dev/null | awk 'NR>1 && $2 != "overlay" {
+    done < <(df -hT 2>/dev/null | awk 'NR>1 && $2 != "overlay" && $2 != "tmpfs" && $2 != "devtmpfs" {
         if (NF==7) { print $1"\t"$7"\t"$2"\t"$3"\t"$4"\t"$5"\t"$6 }
         else       { print $1"\t"$6"\t-\t"$2"\t"$3"\t"$4"\t"$5 }
     }')
-    table L L L R R R R "${rows[@]}"
+    table L L R R R R "${rows[@]}"
 
-    # 进度条（过滤 overlay，限制数量）
-    df -h 2>/dev/null | awk 'NR>1 && $1 !~ /^overlay$/ {print $1"\t"$6"\t"$5}' | head -n 8 | while IFS=$'\t' read -r fs mount pct; do
+    # 使用率进度条
+    df -h 2>/dev/null | awk 'NR>1 && $1 !~ /^overlay|tmpfs|devtmpfs$/ {print $1"\t"$6"\t"$5}' | head -n 8 | while IFS=$'\t' read -r fs mount pct; do
         bar "$pct" "$mount"
     done
 
@@ -425,7 +605,7 @@ disk_menu() {
 
     if has lsblk; then
         subtitle "块设备"
-        run lsblk
+        lsblk 2>/dev/null | sed 's/^/  /'
     fi
     pause
 }
@@ -877,10 +1057,10 @@ main_menu() {
         local t=$(date '+%Y-%m-%d %H:%M:%S')
         local host=$(hostname 2>/dev/null || echo 'localhost')
         printf '\n'
-        printf "  ${BOLD}${CYAN}┌──────────────────────────────────────────┐${RESET}\n"
-        printf "  ${BOLD}${CYAN}│${RESET}  ${BOLD}VPS 运维工具箱${RESET}${DIM}  %s@${RESET}${CYAN}%s${RESET}     ${BOLD}${CYAN}│${RESET}\n" "$USER" "$host"
-        printf "  ${BOLD}${CYAN}│${RESET}  ${DIM}%s${RESET}   pkg:%s  init:%s      ${BOLD}${CYAN}│${RESET}\n" "$t" "$PKG" "$INIT"
-        printf "  ${BOLD}${CYAN}└──────────────────────────────────────────┘${RESET}\n\n"
+        printf "  ${BOLD}${CYAN}%s${RESET}\n" "${BANNER_TOP}"
+        printf "  ${BOLD}${CYAN}%s${RESET}  ${BOLD}VPS 运维工具箱${RESET}${DIM}  %s@${RESET}${CYAN}%s${RESET}     ${BOLD}${CYAN}%s${RESET}\n" "${BANNER_V}" "$USER" "$host" "${BANNER_V}"
+        printf "  ${BOLD}${CYAN}%s${RESET}  ${DIM}%s${RESET}   pkg:%s  init:%s      ${BOLD}${CYAN}%s${RESET}\n" "${BANNER_V}" "$t" "$PKG" "$INIT" "${BANNER_V}"
+        printf "  ${BOLD}${CYAN}%s${RESET}\n\n" "${BANNER_BOT}"
 
         cat <<EOF
    ${GREEN}1.${RESET} 系统信息
@@ -893,8 +1073,9 @@ main_menu() {
    ${GREEN}8.${RESET} 防火墙管理
    ${GREEN}9.${RESET} 系统更新
    ${GREEN}10.${RESET} 进阶工具 (SSH加固 / Swap / BBR / Docker)
+   ${GREEN}11.${RESET} 仪表盘 (一屏总览)
 EOF
-        (( IS_ALPINE )) && echo -e "   ${GREEN}11.${RESET} Alpine 专属工具"
+        (( IS_ALPINE )) && echo -e "   ${GREEN}12.${RESET} Alpine 专属工具"
         echo -e "   ${GREEN}0.${RESET} 退出"
         echo
         read -rp "请输入选项: " choice
@@ -909,7 +1090,8 @@ EOF
             8) firewall_menu ;;
             9) system_update ;;
             10) advanced_menu ;;
-            11) alpine_menu ;;
+            11) dashboard ;;
+            12) alpine_menu ;;
             0) info "再见!"; exit 0 ;;
             *) err "无效选项"; sleep 1 ;;
         esac
