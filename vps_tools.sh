@@ -135,7 +135,15 @@ linux_info() {
 
     local mem_info=$(free -b | awk 'NR==2{printf "%.2f/%.2fM (%.2f%%)", $3/1024/1024, $2/1024/1024, $3*100/$2}')
 
-    local disk_info=$(df -h / 2>/dev/null | awk 'NR==2{printf "%s/%s (%s)", $3, $2, $5}')
+    local disk_info
+    if has df; then
+        # 使用 -B1 输出字节，避免 BusyBox df 列宽/换行导致字段错位
+        disk_info=$(df -B1 / 2>/dev/null | awk 'NR==2{
+            used=$3; size=$2; pct=$5;
+            printf "%.1fG/%.1fG (%s)", used/1024/1024/1024, size/1024/1024/1024, pct
+        }')
+    fi
+    [[ -z "$disk_info" ]] && disk_info="未知"
 
     local ipinfo country city isp_info
     ipinfo=$(http_get "https://ipinfo.io/json" 5)
