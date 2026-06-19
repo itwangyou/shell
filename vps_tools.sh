@@ -176,8 +176,8 @@ linux_info() {
 
     local tcp_count udp_count
     if has ss; then
-        tcp_count=$(ss -t | wc -l)
-        udp_count=$(ss -u | wc -l)
+        tcp_count=$(ss -tH | wc -l)
+        udp_count=$(ss -uH | wc -l)
     else
         tcp_count=$(count_connections "tcp")
         udp_count=$(count_connections "udp")
