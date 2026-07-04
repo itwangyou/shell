@@ -38,6 +38,11 @@ detect_main_iface() {
         echo "$ifaces" | cat -n
         read -r -p "👉 请选择 [1-$count]: " choice
 
+        if ! [[ "$choice" =~ ^[0-9]+$ ]] || [[ "$choice" -lt 1 || "$choice" -gt "$count" ]]; then
+            echo -e "${RED}❌ 无效选择${NC}"
+            exit 1
+        fi
+
         MAIN_IFACE=$(echo "$ifaces" | sed -n "${choice}p")
 
         if [[ -z "$MAIN_IFACE" ]]; then
@@ -157,7 +162,9 @@ check_current_saved_rules_diff() {
                 if restore_rules_from_file_replace_current; then
                     echo -e "${GREEN}✅ 已从保存文件恢复规则${NC}"
                 else
-                    echo -e "${RED}❌ 从保存文件恢复失败，已保留当前内存规则${NC}"
+                    rm -f "$current_tmp"
+                    echo -e "${RED}❌ 从保存文件恢复失败，为避免后续保存覆盖旧规则，已停止${NC}"
+                    exit 1
                 fi
             else
                 echo -e "${YELLOW}继续使用当前内存规则；后续保存可能覆盖旧保存文件${NC}"
@@ -236,6 +243,7 @@ valid_port() {
     local port="$1"
 
     [[ "$port" =~ ^[0-9]+$ ]] || return 1
+    [[ ${#port} -le 5 ]] || return 1
 
     local value=$((10#$port))
     [[ "$value" -ge 1 && "$value" -le 65535 ]]
@@ -259,6 +267,7 @@ normalize_ipv4() {
 
     for n in "$a" "$b" "$c" "$d"; do
         [[ "$n" =~ ^[0-9]+$ ]] || return 1
+        [[ ${#n} -le 3 ]] || return 1
         value=$((10#$n))
         [[ "$value" -ge 0 && "$value" -le 255 ]] || return 1
     done
@@ -595,9 +604,9 @@ init_env() {
     setup_autoload
 }
 
-# 13. 添加线路
+# 13. 添加规则
 add_rule() {
-    echo -e "\n${BLUE}--- 新增转发线路 ---${NC}"
+    echo -e "\n${BLUE}--- 新增转发规则 ---${NC}"
 
     read -r -p "👉 本地监听端口: " LPORT
 
@@ -772,7 +781,7 @@ list_rules() {
     fi
 }
 
-# 15. 删除线路
+# 15. 删除规则
 delete_rule() {
     list_rules
     echo ""
@@ -828,7 +837,124 @@ delete_rule() {
     fi
 }
 
-# 16. 清空重置
+# 16. 按本地端口删除规则
+delete_rules_by_port() {
+    echo -e "\n${BLUE}--- 按本地端口删除规则 ---${NC}"
+
+    read -r -p "👉 输入要删除的本地监听端口: " LPORT
+
+    [[ -z "$LPORT" ]] && {
+        echo -e "${RED}❌ 端口不能为空${NC}"
+        return
+    }
+
+    if ! valid_port "$LPORT"; then
+        echo -e "${RED}❌ 端口无效，范围应为 1-65535${NC}"
+        return
+    fi
+
+    LPORT=$(normalize_port "$LPORT") || {
+        echo -e "${RED}❌ 端口规范化失败${NC}"
+        return
+    }
+
+    local matches
+    matches=$(nft -a list chain ip "$NFT_TABLE" prerouting 2>/dev/null \
+        | awk -v port="$LPORT" '
+            / dnat to / && $0 ~ "dport " port " " && $0 ~ /handle [0-9]+$/ { print }
+        ')
+
+    if [[ -z "$matches" ]]; then
+        echo -e "${YELLOW}未找到本地端口 $LPORT 对应的转发规则${NC}"
+        return
+    fi
+
+    echo -e "${YELLOW}将删除以下规则:${NC}"
+    echo "$matches"
+
+    read -r -p "👉 确认删除这些规则？(y/n): " c
+    [[ ! "$c" =~ ^[Yy]$ ]] && {
+        echo -e "${YELLOW}已取消${NC}"
+        return
+    }
+
+    local meta_tmp
+    meta_tmp=$(mktemp /tmp/nftables-trans-delete-port.XXXXXX) || {
+        echo -e "${RED}❌ 创建临时文件失败${NC}"
+        return
+    }
+
+    echo "$matches" | awk '
+        {
+            proto=""; target=""; handle=""
+            for (i=1; i<=NF; i++) {
+                if ($i == "tcp" || $i == "udp") proto=$i
+                if ($i == "to" && (i+1)<=NF) target=$(i+1)
+                if ($i == "handle" && (i+1)<=NF) handle=$(i+1)
+            }
+            if (proto != "" && target != "" && handle != "") print handle, proto, target
+        }
+    ' > "$meta_tmp"
+
+    local deleted=0 failed=0
+    local handle proto target bip bport
+
+    while read -r handle proto target; do
+        [[ -z "$handle" ]] && continue
+
+        if nft delete rule ip "$NFT_TABLE" prerouting handle "$handle"; then
+            deleted=$((deleted + 1))
+            bip=${target%:*}
+            bport=${target##*:}
+            ufw_route_delete_if_unused "$proto" "$bip" "$bport"
+        else
+            failed=$((failed + 1))
+            echo -e "${RED}❌ 删除规则 handle #$handle 失败${NC}"
+        fi
+    done < "$meta_tmp"
+
+    rm -f "$meta_tmp"
+
+    if [[ "$deleted" -gt 0 ]]; then
+        save_rules_or_warn
+        echo -e "${GREEN}✅ 已删除 $deleted 条本地端口 $LPORT 的转发规则${NC}"
+    fi
+
+    if [[ "$failed" -gt 0 ]]; then
+        echo -e "${YELLOW}⚠️ 有 $failed 条规则删除失败，请重新查看规则${NC}"
+    fi
+}
+
+# 17. 删除规则二级菜单
+delete_menu() {
+    while true; do
+        echo ""
+        echo -e "${BLUE}--- 删除指定规则 ---${NC}"
+        echo "  [1] 按 handle 删除指定规则"
+        echo "  [2] 按本地端口删除规则"
+        echo "  [0] 返回主菜单"
+        echo -e "${BLUE}========================================${NC}"
+
+        read -r -p "👉 请选择删除方式 [0-2]: " choice
+
+        case "$choice" in
+            1)
+                delete_rule
+                ;;
+            2)
+                delete_rules_by_port
+                ;;
+            0)
+                break
+                ;;
+            *)
+                echo -e "${RED}❌ 无效选择${NC}"
+                ;;
+        esac
+    done
+}
+
+# 18. 清空所有规则
 reset_rules() {
     echo -e "\n${RED}⚠️ 此操作将清空所有 NAT 转发规则，MASQUERADE 保留${NC}"
     read -r -p "👉 确认清空？(y/n): " c
@@ -859,7 +985,7 @@ reset_rules() {
     fi
 }
 
-# 17. 卸载脚本配置
+# 19. 卸载脚本配置
 uninstall_tool() {
     echo -e "\n${RED}⚠️ 卸载将删除本脚本创建的配置和规则:${NC}"
     echo "  - nftables 表: ip $NFT_TABLE"
@@ -922,12 +1048,12 @@ init_env
 while true; do
     echo ""
     echo -e "${BLUE}========================================${NC}"
-    echo -e "${BLUE}  Debian nftables 中转管理工具 (v1.3.1)${NC}"
+    echo -e "${BLUE}  Debian nftables 中转管理工具 (v1.4.2)${NC}"
     echo -e "${BLUE}========================================${NC}"
-    echo "  [1] 添加转发线路"
+    echo "  [1] 添加转发规则"
     echo "  [2] 查看当前规则"
-    echo "  [3] 删除指定线路"
-    echo "  [4] 清空重置所有规则"
+    echo "  [3] 删除指定规则"
+    echo "  [4] 清空所有规则"
     echo "  [5] 卸载脚本配置"
     echo "  [0] 退出脚本"
     echo -e "${BLUE}========================================${NC}"
@@ -942,7 +1068,7 @@ while true; do
             list_rules
             ;;
         3)
-            delete_rule
+            delete_menu
             ;;
         4)
             reset_rules
