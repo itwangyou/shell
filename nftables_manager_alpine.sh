@@ -1,7 +1,7 @@
 #!/bin/bash
 # =============================================
 # Alpine nftables 中转管理工具 (v1.4.1)
-# 用法: bash <(curl -fsSL https://raw.githubusercontent.com/itwangyou/shell/main/nftables_manager_alpine.sh)
+# 用法: bash <(curl -fsSL <URL>)
 # =============================================
 
 RED='\033[0;31m'
