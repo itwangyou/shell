@@ -1,7 +1,7 @@
 #!/bin/bash
 # =============================================
-# Alpine nftables 中转管理工具 (v1.3)
-# 用法: bash <(curl -sL <URL>)
+# Alpine nftables 中转管理工具 (v1.4.1)
+# 用法: bash <(curl -fsSL https://raw.githubusercontent.com/itwangyou/shell/main/nftables_manager_alpine.sh)
 # =============================================
 
 RED='\033[0;31m'
@@ -13,6 +13,7 @@ NC='\033[0m'
 NFT_TABLE="nat-trans"
 RULES_FILE="/etc/nftables-trans.nft"
 SYSCTL_FORWARD_FILE="/etc/sysctl.d/99-nftables-trans-forward.conf"
+LOCAL_RESTORE_SCRIPT="/etc/local.d/nftables-restore.start"
 
 # 1. 自动检测主出站网卡
 detect_main_iface() {
@@ -33,9 +34,21 @@ detect_main_iface() {
     else
         echo -e "${YELLOW}⚠️ 检测到多个默认路由网卡:${NC}"
         echo "$ifaces" | cat -n
-        read -p "👉 请选择 [1-$count]: " choice
+        read -r -p "👉 请选择 [1-$count]: " choice
 
-        MAIN_IFACE=$(echo "$ifaces" | sed -n "${choice}p")
+        if ! [[ "$choice" =~ ^[0-9]+$ ]] || [[ ${#choice} -gt 6 ]]; then
+            echo -e "${RED}❌ 无效选择${NC}"
+            exit 1
+        fi
+
+        local choice_num=$((10#$choice))
+
+        if [[ "$choice_num" -lt 1 || "$choice_num" -gt "$count" ]]; then
+            echo -e "${RED}❌ 无效选择${NC}"
+            exit 1
+        fi
+
+        MAIN_IFACE=$(echo "$ifaces" | sed -n "${choice_num}p")
 
         if [[ -z "$MAIN_IFACE" ]]; then
             echo -e "${RED}❌ 无效选择${NC}"
@@ -46,7 +59,7 @@ detect_main_iface() {
     fi
 }
 
-# 2. 确保 IPv4 转发当前生效，并写入持久化配置
+# 2. 确保 IPv4 转发当前生效，并写入脚本专用持久化配置
 ensure_ip_forward() {
     local current
     current=$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)
@@ -89,34 +102,109 @@ restore_saved_rules_if_needed() {
 
     echo -e "${YELLOW}⚠️ 当前 nft 表不存在，检测到已保存规则，尝试恢复${NC}"
 
-    if ! nft -c -f "$RULES_FILE" &>/dev/null; then
-        echo -e "${RED}❌ 已保存规则文件语法检查失败，为避免覆盖旧文件，已停止${NC}"
+    if restore_rules_from_file_replace_current; then
+        echo -e "${GREEN}✅ 已从 $RULES_FILE 恢复规则${NC}"
+    else
+        echo -e "${RED}❌ 从 $RULES_FILE 恢复失败（规则文件可能损坏），为避免覆盖旧文件，已停止${NC}"
         echo -e "${YELLOW}请检查: $RULES_FILE${NC}"
         exit 1
     fi
+}
 
-    if nft -f "$RULES_FILE"; then
-        echo -e "${GREEN}✅ 已从 $RULES_FILE 恢复规则${NC}"
-    else
-        echo -e "${RED}❌ 从 $RULES_FILE 恢复规则失败，为避免覆盖旧文件，已停止${NC}"
-        exit 1
+restore_rules_from_file_replace_current() {
+    local tmp
+    tmp=$(mktemp /tmp/nftables-trans-restore-now.XXXXXX) || return 1
+
+    {
+        if nft list table ip "$NFT_TABLE" &>/dev/null; then
+            echo "delete table ip $NFT_TABLE"
+        fi
+        cat "$RULES_FILE"
+    } > "$tmp"
+
+    if nft -c -f "$tmp" &>/dev/null && nft -f "$tmp"; then
+        rm -f "$tmp"
+        return 0
     fi
+
+    rm -f "$tmp"
+    return 1
+}
+
+rules_have_dnat() {
+    grep -q ' dnat to ' "$1" 2>/dev/null
+}
+
+check_current_saved_rules_diff() {
+    if [[ ! -s "$RULES_FILE" ]]; then
+        return 0
+    fi
+
+    if ! nft list table ip "$NFT_TABLE" &>/dev/null; then
+        return 0
+    fi
+
+    local current_tmp
+    current_tmp=$(mktemp /tmp/nftables-trans-current.XXXXXX) || {
+        echo -e "${YELLOW}⚠️ 创建临时文件失败，跳过当前/保存规则差异检测${NC}"
+        return 0
+    }
+
+    if ! nft list table ip "$NFT_TABLE" > "$current_tmp"; then
+        rm -f "$current_tmp"
+        echo -e "${YELLOW}⚠️ 读取当前 nft 规则失败，跳过当前/保存规则差异检测${NC}"
+        return 0
+    fi
+
+    if ! cmp -s "$current_tmp" "$RULES_FILE"; then
+        echo -e "${YELLOW}⚠️ 检测到当前内存规则与保存文件不一致${NC}"
+
+        if rules_have_dnat "$RULES_FILE" && ! rules_have_dnat "$current_tmp"; then
+            echo -e "${YELLOW}保存文件中存在转发规则，但当前内存规则中没有转发规则。${NC}"
+            read -r -p "👉 是否从保存文件恢复规则？(y/n): " c
+
+            if [[ "$c" =~ ^[Yy]$ ]]; then
+                if restore_rules_from_file_replace_current; then
+                    echo -e "${GREEN}✅ 已从保存文件恢复规则${NC}"
+                else
+                    rm -f "$current_tmp"
+                    echo -e "${RED}❌ 从保存文件恢复失败，为避免后续保存覆盖旧规则，已停止${NC}"
+                    exit 1
+                fi
+            else
+                echo -e "${YELLOW}继续使用当前内存规则；后续保存可能覆盖旧保存文件${NC}"
+            fi
+        else
+            echo -e "${YELLOW}继续使用当前内存规则；后续保存会以当前规则为准${NC}"
+        fi
+    fi
+
+    rm -f "$current_tmp"
 }
 
 # 4. 初始化 nftables table 和 chain
 init_nft_table() {
     if ! nft list table ip "$NFT_TABLE" &>/dev/null; then
-        nft add table ip "$NFT_TABLE"
+        nft add table ip "$NFT_TABLE" || {
+            echo -e "${RED}❌ 创建 nftables 表失败${NC}"
+            exit 1
+        }
         echo -e "${GREEN}✅ 已创建 nftables 表: $NFT_TABLE${NC}"
     fi
 
     if ! nft list chain ip "$NFT_TABLE" prerouting &>/dev/null; then
-        nft add chain ip "$NFT_TABLE" prerouting '{ type nat hook prerouting priority dstnat; policy accept; }'
+        nft add chain ip "$NFT_TABLE" prerouting '{ type nat hook prerouting priority dstnat; policy accept; }' || {
+            echo -e "${RED}❌ 创建 prerouting 链失败${NC}"
+            exit 1
+        }
         echo -e "${GREEN}✅ 已创建 prerouting 链${NC}"
     fi
 
     if ! nft list chain ip "$NFT_TABLE" postrouting &>/dev/null; then
-        nft add chain ip "$NFT_TABLE" postrouting '{ type nat hook postrouting priority srcnat; policy accept; }'
+        nft add chain ip "$NFT_TABLE" postrouting '{ type nat hook postrouting priority srcnat; policy accept; }' || {
+            echo -e "${RED}❌ 创建 postrouting 链失败${NC}"
+            exit 1
+        }
         echo -e "${GREEN}✅ 已创建 postrouting 链${NC}"
     fi
 }
@@ -146,7 +234,57 @@ save_rules() {
     fi
 }
 
-# 6. 检查同协议同本地端口是否已被占用
+save_rules_or_warn() {
+    if ! save_rules; then
+        echo -e "${YELLOW}⚠️ 当前规则已在内存中变更，但保存失败；重启后可能丢失${NC}"
+        return 1
+    fi
+
+    return 0
+}
+
+# 6. 基础输入校验与规范化
+valid_port() {
+    local port="$1"
+
+    [[ "$port" =~ ^[0-9]+$ ]] || return 1
+    [[ ${#port} -le 5 ]] || return 1
+
+    local value=$((10#$port))
+    [[ "$value" -ge 1 && "$value" -le 65535 ]]
+}
+
+normalize_port() {
+    local port="$1"
+
+    valid_port "$port" || return 1
+    echo "$((10#$port))"
+}
+
+normalize_ipv4() {
+    local ip="$1"
+    local IFS=.
+    local a b c d extra n value
+
+    read -r a b c d extra <<< "$ip"
+
+    [[ -z "$extra" ]] || return 1
+
+    for n in "$a" "$b" "$c" "$d"; do
+        [[ "$n" =~ ^[0-9]+$ ]] || return 1
+        [[ ${#n} -le 3 ]] || return 1
+        value=$((10#$n))
+        [[ "$value" -ge 0 && "$value" -le 255 ]] || return 1
+    done
+
+    echo "$((10#$a)).$((10#$b)).$((10#$c)).$((10#$d))"
+}
+
+valid_ipv4() {
+    normalize_ipv4 "$1" >/dev/null
+}
+
+# 7. 检查同协议同本地端口是否已被占用
 port_proto_in_use() {
     local proto="$1"
     local port="$2"
@@ -189,7 +327,7 @@ ensure_no_port_conflict() {
     return "$conflict"
 }
 
-# 7. 使用更精确的 MASQUERADE：只处理已 DNAT 的连接
+# 8. 使用更精确的 MASQUERADE：只处理已 DNAT 的连接
 has_precise_masquerade_rule() {
     nft list chain ip "$NFT_TABLE" postrouting 2>/dev/null \
         | grep -Fq "ct status dnat oifname \"$MAIN_IFACE\" masquerade"
@@ -202,7 +340,7 @@ remove_broad_masquerade_rules() {
 
     echo "$rules" \
         | awk -v iface="$MAIN_IFACE" '
-            index($0, "ct status dnat") == 0 && index($0, "oifname \"" iface "\" masquerade") > 0 && $0 ~ /handle [0-9]+$/ {
+            $0 ~ /^[ \t]*oifname "[^"]+" masquerade # handle [0-9]+$/ && index($0, "oifname \"" iface "\" masquerade") > 0 {
                 sub(/^.* handle /, "", $0)
                 print $0
             }
@@ -233,76 +371,141 @@ ensure_masquerade_rule() {
     remove_broad_masquerade_rules
 }
 
-# 8. 配置开机自动加载规则：先 nft -c -f 检查，再加载
-setup_autoload() {
-    mkdir -p /etc/local.d
+# 9. 本地监听端口占用检测
+get_local_listeners_on_port() {
+    local port="$1"
+    local proto_filter="${2:-any}"
 
-    cat > /etc/local.d/nftables-restore.start << 'SCRIPT'
-#!/bin/sh
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
-
-NFT_TABLE="nat-trans"
-RULES_FILE="/etc/nftables-trans.nft"
-
-if [ -s "$RULES_FILE" ]; then
-    CHECK_FILE=$(mktemp /tmp/nftables-trans-check.XXXXXX) || {
-        echo "nftables-trans: failed to create temporary check file" >&2
-        exit 1
-    }
-
-    {
-        echo "destroy table ip $NFT_TABLE"
-        cat "$RULES_FILE"
-    } > "$CHECK_FILE"
-
-    if nft -c -f "$CHECK_FILE" >/dev/null 2>&1; then
-        if ! nft -f "$CHECK_FILE" >/dev/null 2>&1; then
-            echo "nftables-trans: restore failed" >&2
-        fi
-    else
-        echo "nftables-trans: saved rules check failed, skip restore" >&2
-    fi
-
-    rm -f "$CHECK_FILE"
-fi
-SCRIPT
-
-    chmod +x /etc/local.d/nftables-restore.start
-
-    if rc-update add local default 2>/dev/null; then
-        echo -e "${GREEN}✅ 已配置开机自动加载规则 (local.d)${NC}"
-    else
-        echo -e "${YELLOW}⚠️ 配置 local 服务自启失败，请手动检查 rc-update add local default${NC}"
+    if command -v ss &>/dev/null; then
+        ss -H -lntu 2>/dev/null | awk -v p=":$port" -v proto="$proto_filter" '
+            $5 ~ p"$" {
+                if (proto == "any" || $1 == proto) print
+            }
+        '
+    elif command -v netstat &>/dev/null; then
+        netstat -lntu 2>/dev/null | awk -v p=":$port" -v proto="$proto_filter" '
+            $4 ~ p"$" {
+                if (proto == "any" || tolower($1) ~ "^" proto) print
+            }
+        '
     fi
 }
 
-# 9. 环境初始化
+warn_if_local_port_in_use() {
+    local port="$1"
+    local proto_choice="$2"
+    local listeners=""
+
+    case "$proto_choice" in
+        1)
+            listeners=$(get_local_listeners_on_port "$port" tcp; get_local_listeners_on_port "$port" udp)
+            ;;
+        2)
+            listeners=$(get_local_listeners_on_port "$port" tcp)
+            ;;
+        3)
+            listeners=$(get_local_listeners_on_port "$port" udp)
+            ;;
+        *)
+            listeners=$(get_local_listeners_on_port "$port" any)
+            ;;
+    esac
+
+    if [[ -n "$listeners" ]]; then
+        echo -e "${YELLOW}⚠️ 检测到本机已有服务监听端口 $port:${NC}"
+        echo "$listeners" | sort -u
+        echo -e "${YELLOW}DNAT 规则仍可添加，但该端口已有本机服务时可能造成访问结果不符合预期。${NC}"
+        read -r -p "👉 确认继续？(y/n): " c
+
+        if [[ ! "$c" =~ ^[Yy]$ ]]; then
+            echo -e "${YELLOW}已取消${NC}"
+            return 1
+        fi
+    fi
+
+    return 0
+}
+
+# 10. 配置 Alpine/OpenRC local.d 开机自动恢复
+setup_autoload() {
+    mkdir -p /etc/local.d
+
+    cat > "$LOCAL_RESTORE_SCRIPT" << 'SCRIPT'
+#!/bin/sh
+set -eu
+
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+NFT_TABLE="nat-trans"
+RULES_FILE="/etc/nftables-trans.nft"
+TMP_FILE=$(mktemp /tmp/nftables-trans-restore.XXXXXX) || {
+    echo "nftables-trans: failed to create temporary file" >&2
+    exit 1
+}
+
+cleanup() {
+    rm -f "$TMP_FILE"
+}
+trap cleanup EXIT INT TERM
+
+if [ ! -s "$RULES_FILE" ]; then
+    echo "nftables-trans: rules file not found or empty, skip restore" >&2
+    exit 0
+fi
+
+if nft list table ip "$NFT_TABLE" >/dev/null 2>&1; then
+    echo "delete table ip $NFT_TABLE" > "$TMP_FILE"
+else
+    : > "$TMP_FILE"
+fi
+
+cat "$RULES_FILE" >> "$TMP_FILE"
+
+if nft -c -f "$TMP_FILE" >/dev/null 2>&1; then
+    nft -f "$TMP_FILE"
+else
+    echo "nftables-trans: saved rules check failed, skip restore" >&2
+    exit 1
+fi
+SCRIPT
+
+    chmod +x "$LOCAL_RESTORE_SCRIPT"
+
+    if rc-update add local default 2>/dev/null; then
+        echo -e "${GREEN}✅ 已配置开机自动恢复脚本: $LOCAL_RESTORE_SCRIPT${NC}"
+    else
+        echo -e "${YELLOW}⚠️ 配置 local 服务自启失败，请手动检查: rc-update add local default${NC}"
+        return 1
+    fi
+}
+
+# 11. 环境初始化
 init_env() {
     if [[ $EUID -ne 0 ]]; then
         echo -e "${RED}❌ 请使用 root 运行${NC}"
         exit 1
     fi
 
-    if ! grep -qi alpine /etc/os-release; then
-        echo -e "${YELLOW}⚠️ 此脚本专为 Alpine 设计，继续可能出错${NC}"
-        read -p "👉 仍然继续？(y/n): " c
+    if ! grep -qi '^ID=alpine' /etc/os-release; then
+        echo -e "${YELLOW}⚠️ 此脚本专为 Alpine 系统设计，继续可能出错${NC}"
+        read -r -p "👉 仍然继续？(y/n): " c
         [[ ! "$c" =~ ^[Yy]$ ]] && exit 1
     fi
 
-    local MISSING=""
+    local MISSING=()
 
     if ! command -v ip &>/dev/null; then
-        MISSING+="iproute2 "
+        MISSING+=("iproute2")
     fi
 
     if ! command -v nft &>/dev/null; then
-        MISSING+="nftables "
+        MISSING+=("nftables")
     fi
 
-    if [[ -n "$MISSING" ]]; then
-        echo -e "${YELLOW}📦 安装缺失依赖: $MISSING${NC}"
+    if [[ ${#MISSING[@]} -gt 0 ]]; then
+        echo -e "${YELLOW}📦 安装缺失依赖: ${MISSING[*]}${NC}"
 
-        if ! apk add --no-cache $MISSING; then
+        if ! apk add --no-cache "${MISSING[@]}"; then
             echo -e "${RED}❌ 依赖安装失败${NC}"
             exit 1
         fi
@@ -318,31 +521,36 @@ init_env() {
     ensure_ip_forward
     detect_main_iface
     restore_saved_rules_if_needed
+    check_current_saved_rules_diff
     init_nft_table
     ensure_masquerade_rule
+    save_rules_or_warn
     setup_autoload
-    save_rules
 }
 
-# 10. 添加线路
+# 12. 添加规则
 add_rule() {
-    echo -e "\n${BLUE}--- 新增转发线路 ---${NC}"
+    echo -e "\n${BLUE}--- 新增转发规则 ---${NC}"
 
-    read -p "👉 本地监听端口: " LPORT
+    read -r -p "👉 本地监听端口: " LPORT
 
     [[ -z "$LPORT" ]] && {
         echo -e "${RED}❌ 端口不能为空${NC}"
         return
     }
 
-    if ! [[ "$LPORT" =~ ^[0-9]+$ ]] || [[ "$LPORT" -lt 1 || "$LPORT" -gt 65535 ]]; then
+    if ! valid_port "$LPORT"; then
         echo -e "${RED}❌ 端口无效，范围应为 1-65535${NC}"
         return
     fi
+    LPORT=$(normalize_port "$LPORT") || {
+        echo -e "${RED}❌ 端口规范化失败${NC}"
+        return
+    }
 
     if [[ "$LPORT" -eq 22 ]]; then
         echo -e "${YELLOW}⚠️ 警告：本地端口 22 通常是 SSH 端口，错误转发可能导致无法登录${NC}"
-        read -p "👉 确认继续？(y/n): " c
+        read -r -p "👉 确认继续？(y/n): " c
 
         [[ ! "$c" =~ ^[Yy]$ ]] && {
             echo -e "${YELLOW}已取消${NC}"
@@ -350,31 +558,39 @@ add_rule() {
         }
     fi
 
-    read -p "👉 后端服务器 IP: " BIP
+    read -r -p "👉 后端服务器 IP: " BIP
 
     [[ -z "$BIP" ]] && {
         echo -e "${RED}❌ IP 不能为空${NC}"
         return
     }
 
-    if ! [[ "$BIP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    if ! valid_ipv4 "$BIP"; then
         echo -e "${RED}❌ IP 格式无效，请输入合法的 IPv4 地址${NC}"
         return
     fi
+    BIP=$(normalize_ipv4 "$BIP") || {
+        echo -e "${RED}❌ IP 规范化失败${NC}"
+        return
+    }
 
-    read -p "👉 后端服务器端口: " BPORT
+    read -r -p "👉 后端服务器端口: " BPORT
 
     [[ -z "$BPORT" ]] && {
         echo -e "${RED}❌ 端口不能为空${NC}"
         return
     }
 
-    if ! [[ "$BPORT" =~ ^[0-9]+$ ]] || [[ "$BPORT" -lt 1 || "$BPORT" -gt 65535 ]]; then
+    if ! valid_port "$BPORT"; then
         echo -e "${RED}❌ 端口无效，范围应为 1-65535${NC}"
         return
     fi
+    BPORT=$(normalize_port "$BPORT") || {
+        echo -e "${RED}❌ 端口规范化失败${NC}"
+        return
+    }
 
-    read -p "👉 协议 [1]TCP+UDP(默认) [2]仅TCP [3]仅UDP (回车默认1): " proto
+    read -r -p "👉 协议 [1]TCP+UDP(默认) [2]仅TCP [3]仅UDP (回车默认1): " proto
     proto=${proto:-1}
 
     case "$proto" in
@@ -385,6 +601,10 @@ add_rule() {
             return
             ;;
     esac
+
+    if ! warn_if_local_port_in_use "$LPORT" "$proto"; then
+        return
+    fi
 
     if ! ensure_no_port_conflict "$proto" "$LPORT"; then
         echo -e "${YELLOW}⚠️ 为避免同协议同端口冲突，本次添加已取消${NC}"
@@ -438,17 +658,15 @@ add_rule() {
             ;;
     esac
 
-    save_rules
+    save_rules_or_warn
 }
 
-# 11. 查看规则
+# 13. 查看规则
 list_rules() {
     echo -e "\n${BLUE}--- 当前 NAT 转发规则 ---${NC}"
 
     local rules
-    rules=$(nft -a list chain ip "$NFT_TABLE" prerouting 2>&1)
-
-    if [[ $? -ne 0 ]]; then
+    if ! rules=$(nft -a list chain ip "$NFT_TABLE" prerouting 2>&1); then
         echo -e "${RED}❌ 读取转发规则失败: $rules${NC}"
     else
         local matched
@@ -464,9 +682,7 @@ list_rules() {
     echo -e "\n${BLUE}--- 回包伪装规则 ---${NC}"
 
     local mask_rules
-    mask_rules=$(nft -a list chain ip "$NFT_TABLE" postrouting 2>&1)
-
-    if [[ $? -ne 0 ]]; then
+    if ! mask_rules=$(nft -a list chain ip "$NFT_TABLE" postrouting 2>&1); then
         echo -e "${RED}❌ 读取伪装规则失败: $mask_rules${NC}"
     else
         local matched
@@ -480,12 +696,12 @@ list_rules() {
     fi
 }
 
-# 12. 删除线路
+# 14. 删除规则
 delete_rule() {
     list_rules
     echo ""
 
-    read -p "👉 输入要删除的规则 handle 编号: " HANDLE
+    read -r -p "👉 输入要删除的规则 handle 编号: " HANDLE
 
     [[ -z "$HANDLE" ]] && {
         echo -e "${RED}❌ handle 不能为空${NC}"
@@ -498,16 +714,23 @@ delete_rule() {
     }
 
     if nft -a list chain ip "$NFT_TABLE" prerouting 2>/dev/null | grep -qE "handle ${HANDLE}$"; then
-        nft delete rule ip "$NFT_TABLE" prerouting handle "$HANDLE"
-        save_rules
+        nft delete rule ip "$NFT_TABLE" prerouting handle "$HANDLE" || {
+            echo -e "${RED}❌ 删除规则失败${NC}"
+            return
+        }
+
+        save_rules_or_warn
         echo -e "${GREEN}✅ 已删除转发规则 handle #$HANDLE 并保存${NC}"
     elif nft -a list chain ip "$NFT_TABLE" postrouting 2>/dev/null | grep -qE "handle ${HANDLE}$"; then
         echo -e "${YELLOW}⚠️ 该规则为 MASQUERADE 伪装规则，删除后可能导致回包失败${NC}"
-        read -p "👉 确认删除？(y/n): " c
+        read -r -p "👉 确认删除？(y/n): " c
 
         if [[ "$c" =~ ^[Yy]$ ]]; then
-            nft delete rule ip "$NFT_TABLE" postrouting handle "$HANDLE"
-            save_rules
+            nft delete rule ip "$NFT_TABLE" postrouting handle "$HANDLE" || {
+                echo -e "${RED}❌ 删除 MASQUERADE 规则失败${NC}"
+                return
+            }
+            save_rules_or_warn
             echo -e "${GREEN}✅ 已删除 MASQUERADE 规则 handle #$HANDLE 并保存${NC}"
         else
             echo -e "${YELLOW}已取消${NC}"
@@ -517,19 +740,170 @@ delete_rule() {
     fi
 }
 
-# 13. 清空重置
+# 15. 按本地端口删除规则
+delete_rules_by_port() {
+    echo -e "\n${BLUE}--- 按本地端口删除规则 ---${NC}"
+
+    read -r -p "👉 输入要删除的本地监听端口: " LPORT
+
+    [[ -z "$LPORT" ]] && {
+        echo -e "${RED}❌ 端口不能为空${NC}"
+        return
+    }
+
+    if ! valid_port "$LPORT"; then
+        echo -e "${RED}❌ 端口无效，范围应为 1-65535${NC}"
+        return
+    fi
+
+    LPORT=$(normalize_port "$LPORT") || {
+        echo -e "${RED}❌ 端口规范化失败${NC}"
+        return
+    }
+
+    local matches
+    matches=$(nft -a list chain ip "$NFT_TABLE" prerouting 2>/dev/null \
+        | awk -v port="$LPORT" '
+            / dnat to / && $0 ~ "dport " port " " && $0 ~ /handle [0-9]+$/ { print }
+        ')
+
+    if [[ -z "$matches" ]]; then
+        echo -e "${YELLOW}未找到本地端口 $LPORT 对应的转发规则${NC}"
+        return
+    fi
+
+    echo -e "${YELLOW}将删除以下规则:${NC}"
+    echo "$matches"
+
+    read -r -p "👉 确认删除这些规则？(y/n): " c
+    [[ ! "$c" =~ ^[Yy]$ ]] && {
+        echo -e "${YELLOW}已取消${NC}"
+        return
+    }
+
+    local meta_tmp
+    meta_tmp=$(mktemp /tmp/nftables-trans-delete-port.XXXXXX) || {
+        echo -e "${RED}❌ 创建临时文件失败${NC}"
+        return
+    }
+
+    echo "$matches" | awk '
+        {
+            handle=""
+            for (i=1; i<=NF; i++) {
+                if ($i == "handle" && (i+1)<=NF) handle=$(i+1)
+            }
+            if (handle != "") print handle
+        }
+    ' > "$meta_tmp"
+
+    local deleted=0 failed=0
+    local handle
+
+    while read -r handle; do
+        [[ -z "$handle" ]] && continue
+
+        if nft delete rule ip "$NFT_TABLE" prerouting handle "$handle"; then
+            deleted=$((deleted + 1))
+        else
+            failed=$((failed + 1))
+            echo -e "${RED}❌ 删除规则 handle #$handle 失败${NC}"
+        fi
+    done < "$meta_tmp"
+
+    rm -f "$meta_tmp"
+
+    if [[ "$deleted" -gt 0 ]]; then
+        save_rules_or_warn
+        echo -e "${GREEN}✅ 已删除 $deleted 条本地端口 $LPORT 的转发规则${NC}"
+    fi
+
+    if [[ "$failed" -gt 0 ]]; then
+        echo -e "${YELLOW}⚠️ 有 $failed 条规则删除失败，请重新查看规则${NC}"
+    fi
+}
+
+# 16. 删除规则二级菜单
+delete_menu() {
+    while true; do
+        echo ""
+        echo -e "${BLUE}--- 删除指定规则 ---${NC}"
+        echo "  [1] 按 handle 删除指定规则"
+        echo "  [2] 按本地端口删除规则"
+        echo "  [0] 返回主菜单"
+        echo -e "${BLUE}========================================${NC}"
+
+        read -r -p "👉 请选择删除方式 [0-2]: " choice
+
+        case "$choice" in
+            1)
+                delete_rule
+                ;;
+            2)
+                delete_rules_by_port
+                ;;
+            0)
+                break
+                ;;
+            *)
+                echo -e "${RED}❌ 无效选择${NC}"
+                ;;
+        esac
+    done
+}
+
+# 17. 清空所有规则
 reset_rules() {
     echo -e "\n${RED}⚠️ 此操作将清空所有 NAT 转发规则，MASQUERADE 保留${NC}"
-    read -p "👉 确认清空？(y/n): " c
+    read -r -p "👉 确认清空？(y/n): " c
 
     [[ ! "$c" =~ ^[Yy]$ ]] && {
         echo -e "${YELLOW}已取消${NC}"
         return
     }
 
-    nft flush chain ip "$NFT_TABLE" prerouting
-    echo -e "${GREEN}✅ 已清空所有转发规则${NC}"
-    save_rules
+    if nft flush chain ip "$NFT_TABLE" prerouting; then
+        echo -e "${GREEN}✅ 已清空所有转发规则${NC}"
+        save_rules_or_warn
+    else
+        echo -e "${RED}❌ 清空转发规则失败${NC}"
+        return
+    fi
+}
+
+# 18. 卸载脚本配置
+uninstall_tool() {
+    echo -e "\n${RED}⚠️ 卸载将删除本脚本创建的配置和规则:${NC}"
+    echo "  - nftables 表: ip $NFT_TABLE"
+    echo "  - 规则文件: $RULES_FILE"
+    echo "  - OpenRC local.d 恢复脚本: $LOCAL_RESTORE_SCRIPT"
+    echo "  - IPv4 转发持久化配置: $SYSCTL_FORWARD_FILE"
+    echo -e "${YELLOW}注意：不会把当前 net.ipv4.ip_forward 改回 0，避免影响其他服务。${NC}"
+    read -r -p "👉 确认卸载？请输入 yes: " confirm
+
+    if [[ "$confirm" != "yes" ]]; then
+        echo -e "${YELLOW}已取消${NC}"
+        return
+    fi
+
+    rm -f "$LOCAL_RESTORE_SCRIPT"
+
+    if nft list table ip "$NFT_TABLE" &>/dev/null; then
+        if nft delete table ip "$NFT_TABLE"; then
+            echo -e "${GREEN}✅ 已删除 nftables 表: $NFT_TABLE${NC}"
+        else
+            echo -e "${YELLOW}⚠️ 删除 nftables 表失败，请手动检查: nft delete table ip $NFT_TABLE${NC}"
+        fi
+    else
+        echo -e "${GREEN}✅ nftables 表不存在，跳过${NC}"
+    fi
+
+    rm -f "$RULES_FILE" "$SYSCTL_FORWARD_FILE"
+
+    echo -e "${YELLOW}提示：未自动移除 local 服务自启，避免影响其他 /etc/local.d/*.start 脚本。${NC}"
+
+    echo -e "${GREEN}✅ 卸载完成${NC}"
+    exit 0
 }
 
 # === 主程序 ===
@@ -538,16 +912,17 @@ init_env
 while true; do
     echo ""
     echo -e "${BLUE}========================================${NC}"
-    echo -e "${BLUE}  Alpine nftables 中转管理工具 (v1.3.2)${NC}"
+    echo -e "${BLUE}  Alpine nftables 中转管理工具 (v1.4.1)${NC}"
     echo -e "${BLUE}========================================${NC}"
-    echo "  [1] 添加转发线路"
+    echo "  [1] 添加转发规则"
     echo "  [2] 查看当前规则"
-    echo "  [3] 删除指定线路"
-    echo "  [4] 清空重置所有规则"
+    echo "  [3] 删除指定规则"
+    echo "  [4] 清空所有规则"
+    echo "  [5] 卸载脚本配置"
     echo "  [0] 退出脚本"
     echo -e "${BLUE}========================================${NC}"
 
-    read -p "👉 请选择操作 [0-4]: " choice
+    read -r -p "👉 请选择操作 [0-5]: " choice
 
     case "$choice" in
         1)
@@ -557,10 +932,13 @@ while true; do
             list_rules
             ;;
         3)
-            delete_rule
+            delete_menu
             ;;
         4)
             reset_rules
+            ;;
+        5)
+            uninstall_tool
             ;;
         0)
             echo -e "${GREEN}👋 再见${NC}"
