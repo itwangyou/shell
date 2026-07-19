@@ -10,6 +10,7 @@ SERVICE_NAME="sing-box"
 DEFAULT_CONFIG="/etc/sing-box/config.json"
 SERVICE_FILE="/etc/init.d/${SERVICE_NAME}"
 LOG_DIR="/var/log/sing-box"
+LOG_TAIL_PID=""
 LOCK_DIR="/run/singbox-manager.lock"
 LOCK_PID_FILE="${LOCK_DIR}/pid"
 # ==========================================
@@ -81,6 +82,16 @@ release_lock() {
     fi
 }
 
+release_resources() {
+    stop_log_tail
+    release_lock
+}
+
+handle_interrupt() {
+    release_resources
+    exit 128
+}
+
 acquire_lock() {
     local lock_parent="${LOCK_DIR%/*}"
     local old_pid=""
@@ -89,7 +100,7 @@ acquire_lock() {
 
     if mkdir "$LOCK_DIR" 2>/dev/null; then
         printf '%s\n' "$$" > "$LOCK_PID_FILE"
-        trap release_lock EXIT
+        trap release_resources EXIT
         return 0
     fi
 
@@ -102,7 +113,7 @@ acquire_lock() {
         rm -rf "$LOCK_DIR"
         if mkdir "$LOCK_DIR" 2>/dev/null; then
             printf '%s\n' "$$" > "$LOCK_PID_FILE"
-            trap release_lock EXIT
+            trap release_resources EXIT
             return 0
         fi
     fi
@@ -166,6 +177,7 @@ restart_service() {
 }
 
 enable_autostart() {
+    check_bin || return
     if rc-update add "$SERVICE_NAME" default; then
         print_ok "已启用自启"
     else
@@ -183,6 +195,14 @@ disable_autostart() {
     fi
 }
 
+stop_log_tail() {
+    if [[ -n "$LOG_TAIL_PID" ]]; then
+        kill "$LOG_TAIL_PID" 2>/dev/null || true
+        wait "$LOG_TAIL_PID" 2>/dev/null || true
+        LOG_TAIL_PID=""
+    fi
+}
+
 view_logs() {
     local log_files=()
     [[ -f "${LOG_DIR}/error.log" ]] && log_files+=("${LOG_DIR}/error.log")
@@ -191,12 +211,12 @@ view_logs() {
         print_warn "暂无日志文件"
         return
     fi
+
     print_info "显示最近 50 条日志 (按回车键退出):"
     tail -n 50 -f "${log_files[@]}" 2>/dev/null &
-    local pid=$!
+    LOG_TAIL_PID=$!
     read -r
-    kill $pid 2>/dev/null || true
-    wait $pid 2>/dev/null || true
+    stop_log_tail
 }
 
 # ================= 配置工具 =================
@@ -266,7 +286,9 @@ gen_aes() {
     echo " 2) 2022-blake3-aes-256-gcm (需 32 字节密钥)"
     read -r -p "请选择 [1-2, 默认 1]: " choice
     local len=16
-    [[ "$choice" == "2" ]] && len=32
+    if [[ "$choice" == "2" ]]; then
+        len=32
+    fi
     
     print_warn "正在生成 $len 字节 (对应 $((len*8))位) 密钥..."
     local output
@@ -288,7 +310,7 @@ get_latest_version() {
     if ! resolved_latest=$(
         curl -s --connect-timeout 10 --max-time 15 "$api_url" \
             | grep -o '"tag_name": *"[^"]*"' \
-            | grep -o '[0-9.]*'
+            | grep -o '[0-9][0-9A-Za-z.+-]*'
     ); then
         print_err "无法获取版本信息"
         return 1
@@ -539,7 +561,12 @@ upgrade_singbox() {
     get_latest_version latest || return 1
 
     local current
-    if ! current=$("$SINGBOX_BIN" version | head -1 | grep -o '[0-9.]*' | head -1); then
+    if ! current=$(
+        "$SINGBOX_BIN" version \
+            | head -1 \
+            | grep -o '[0-9][0-9A-Za-z.+-]*' \
+            | head -1
+    ); then
         print_err "无法获取当前版本"
         return 1
     fi
@@ -652,6 +679,7 @@ main() {
     check_deps
     check_openrc
     acquire_lock
+    trap handle_interrupt INT TERM
     while true; do
         menu || true
         read -n 1 -s -r -p "按回车继续..."
