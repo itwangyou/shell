@@ -8,7 +8,10 @@ set -euo pipefail
 SINGBOX_BIN="/usr/local/bin/sing-box"
 SERVICE_NAME="sing-box"
 DEFAULT_CONFIG="/etc/sing-box/config.json"
+CONFIG_DIR="${DEFAULT_CONFIG%/*}"
+DATA_DIR="/var/lib/sing-box"
 SERVICE_FILE="/etc/init.d/${SERVICE_NAME}"
+PID_FILE="/run/${SERVICE_NAME}.pid"
 LOG_DIR="/var/log/sing-box"
 LOG_TAIL_PID=""
 LOCK_DIR="/run/singbox-manager.lock"
@@ -42,10 +45,34 @@ check_alpine() {
     fi
 }
 
+ensure_jq() {
+    if command -v jq >/dev/null 2>&1; then
+        return 0
+    fi
+
+    print_warn "未检测到 jq，正在通过 apk 自动安装..."
+    if ! command -v apk >/dev/null 2>&1; then
+        print_err "未找到 apk，无法自动安装 jq"
+        return 1
+    fi
+
+    if ! apk add --no-cache jq; then
+        print_err "jq 自动安装失败，请检查 Alpine 软件源和网络"
+        return 1
+    fi
+
+    if ! command -v jq >/dev/null 2>&1; then
+        print_err "apk 执行成功，但仍未检测到 jq"
+        return 1
+    fi
+
+    print_ok "jq 安装完成"
+}
+
 check_deps() {
     local deps=(
-        bash curl tar grep head mktemp pkill rc-service rc-update
-        uname chmod cp mv rm mkdir cat tail kill
+        bash curl tar mktemp rc-service rc-update
+        uname chmod cp mv rm mkdir cat tail kill sha256sum sleep awk
     )
     local dep
     local missing=0
@@ -87,43 +114,37 @@ release_resources() {
     release_lock
 }
 
-handle_interrupt() {
-    release_resources
-    exit 128
-}
-
 acquire_lock() {
     local lock_parent="${LOCK_DIR%/*}"
     local old_pid=""
 
     mkdir -p "$lock_parent"
 
-    if mkdir "$LOCK_DIR" 2>/dev/null; then
-        printf '%s\n' "$$" > "$LOCK_PID_FILE"
-        trap release_resources EXIT
-        return 0
-    fi
+    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+        if [[ -f "$LOCK_PID_FILE" ]]; then
+            old_pid=$(cat "$LOCK_PID_FILE" 2>/dev/null || true)
+        fi
 
-    if [[ -f "$LOCK_PID_FILE" ]]; then
-        old_pid=$(cat "$LOCK_PID_FILE" 2>/dev/null || true)
-    fi
+        if [[ "$old_pid" =~ ^[0-9]+$ ]] && kill -0 "$old_pid" 2>/dev/null; then
+            print_err "已有 sing-box 管理脚本正在运行 (PID: $old_pid)，请勿重复执行。"
+            return 1
+        fi
 
-    if [[ ! "$old_pid" =~ ^[0-9]+$ ]] || ! kill -0 "$old_pid" 2>/dev/null; then
         print_warn "检测到残留锁，正在清理..."
         rm -rf "$LOCK_DIR"
-        if mkdir "$LOCK_DIR" 2>/dev/null; then
-            printf '%s\n' "$$" > "$LOCK_PID_FILE"
-            trap release_resources EXIT
-            return 0
+        if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+            print_err "清理残留锁后仍无法创建管理锁"
+            return 1
         fi
     fi
 
-    if [[ -n "$old_pid" ]]; then
-        print_err "已有 sing-box 管理脚本正在运行 (PID: $old_pid)，请勿重复执行。"
-    else
-        print_err "已有 sing-box 管理脚本正在运行，请勿重复执行。"
+    if ! printf '%s\n' "$$" > "$LOCK_PID_FILE"; then
+        print_err "写入管理锁 PID 失败"
+        rm -rf "$LOCK_DIR"
+        return 1
     fi
-    exit 1
+
+    trap release_resources EXIT
 }
 
 check_bin() {
@@ -133,10 +154,40 @@ check_bin() {
     fi
 }
 
-get_config_path() {
-    # 与 OpenRC 服务 command_args 保持一致：
-    # /etc/init.d/sing-box 固定使用 /etc/sing-box/config.json
-    echo "$DEFAULT_CONFIG"
+get_singbox_version_info() {
+    local __result_var="$1"
+    local __format="${2:-line}"
+    local output
+    local first_line
+    local parsed_version
+
+    if ! output=$("$SINGBOX_BIN" version 2>/dev/null); then
+        print_err "无法读取 sing-box 版本"
+        return 1
+    fi
+
+    first_line="${output%%$'\n'*}"
+    if [[ ! "$first_line" =~ ([0-9][0-9A-Za-z.+-]*) ]]; then
+        print_err "无法解析 sing-box 版本: $first_line"
+        return 1
+    fi
+    parsed_version="${BASH_REMATCH[1]}"
+
+    case "$__format" in
+        line) printf -v "$__result_var" '%s' "$first_line" ;;
+        number) printf -v "$__result_var" '%s' "$parsed_version" ;;
+        *)
+            print_err "未知版本输出格式: $__format"
+            return 1
+            ;;
+    esac
+}
+
+check_config() {
+    if [[ ! -f "$DEFAULT_CONFIG" ]]; then
+        print_err "未找到配置文件: $DEFAULT_CONFIG"
+        return 1
+    fi
 }
 
 # ================= 服务管理 =================
@@ -221,16 +272,10 @@ view_logs() {
 
 # ================= 配置工具 =================
 view_config() {
-    check_bin || return
-    local cfg
-    cfg=$(get_config_path)
-    if [[ -z "$cfg" || ! -f "$cfg" ]]; then
-        print_err "未找到配置文件"
-        return 1
-    fi
-    print_info "配置文件: $cfg"
+    check_config || return
+    print_info "配置文件: $DEFAULT_CONFIG"
     echo "-----------------------------"
-    if ! cat "$cfg"; then
+    if ! cat "$DEFAULT_CONFIG"; then
         print_err "读取配置文件失败"
         return 1
     fi
@@ -239,14 +284,9 @@ view_config() {
 
 format_config() {
     check_bin || return
-    local cfg
-    cfg=$(get_config_path)
-    if [[ -z "$cfg" || ! -f "$cfg" ]]; then
-        print_err "未找到配置文件"
-        return 1
-    fi
-    print_info "格式化: $cfg"
-    if "$SINGBOX_BIN" format -w -c "$cfg"; then
+    check_config || return
+    print_info "格式化: $DEFAULT_CONFIG"
+    if "$SINGBOX_BIN" format -w -c "$DEFAULT_CONFIG"; then
         print_ok "格式化完成"
     else
         print_err "失败"
@@ -289,7 +329,7 @@ gen_aes() {
     if [[ "$choice" == "2" ]]; then
         len=32
     fi
-    
+
     print_warn "正在生成 $len 字节 (对应 $((len*8))位) 密钥..."
     local output
     if ! output=$("$SINGBOX_BIN" generate rand --base64 "$len" 2>/dev/null); then
@@ -302,26 +342,52 @@ gen_aes() {
 }
 
 # ================= 安装与卸载 =================
-get_latest_version() {
+GITHUB_RELEASE_API="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
+
+get_latest_release() {
+    local __version_var="$1"
+    local __release_var="$2"
+    local __sb_release_payload
+    local __sb_release_version
+
+    if ! __sb_release_payload=$(curl -fsSL --retry 3 --retry-delay 2 \
+        --connect-timeout 10 --max-time 30 "$GITHUB_RELEASE_API"); then
+        print_err "无法获取 GitHub Release 信息"
+        return 1
+    fi
+
+    if ! __sb_release_version=$(jq -er '.tag_name | strings | ltrimstr("v")' <<< "$__sb_release_payload"); then
+        print_err "Release 信息中缺少有效版本号"
+        return 1
+    fi
+
+    if [[ ! "$__sb_release_version" =~ ^[0-9][0-9A-Za-z.+-]*$ ]]; then
+        print_err "Release 信息中的版本号格式无效: $__sb_release_version"
+        return 1
+    fi
+
+    printf -v "$__version_var" '%s' "$__sb_release_version"
+    printf -v "$__release_var" '%s' "$__sb_release_payload"
+}
+
+get_release_asset_digest() {
     local __result_var="$1"
-    local api_url="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
-    local resolved_latest
+    local release_payload="$2"
+    local asset_name="$3"
+    local __sb_asset_digest
 
-    if ! resolved_latest=$(
-        curl -s --connect-timeout 10 --max-time 15 "$api_url" \
-            | grep -o '"tag_name": *"[^"]*"' \
-            | grep -o '[0-9][0-9A-Za-z.+-]*'
-    ); then
-        print_err "无法获取版本信息"
+    if ! __sb_asset_digest=$(jq -er --arg name "$asset_name" '
+        .assets[]
+        | select(.name == $name)
+        | .digest
+        | strings
+        | select(test("^sha256:[0-9a-fA-F]{64}$"))
+    ' <<< "$release_payload"); then
+        print_err "Release 中未找到资产或有效 SHA-256: $asset_name"
         return 1
     fi
 
-    if [[ -z "$resolved_latest" ]]; then
-        print_err "无法获取版本信息"
-        return 1
-    fi
-
-    printf -v "$__result_var" '%s' "$resolved_latest"
+    printf -v "$__result_var" '%s' "${__sb_asset_digest#sha256:}"
 }
 
 detect_singbox_arch() {
@@ -341,37 +407,68 @@ detect_singbox_arch() {
     printf -v "$__result_var" '%s' "$resolved_arch"
 }
 
-build_download_url() {
+build_asset_name() {
     local __result_var="$1"
     local version="$2"
     local arch="$3"
+
+    printf -v "$__result_var" '%s' \
+        "sing-box-${version}-linux-${arch}-musl.tar.gz"
+}
+
+build_download_url() {
+    local __result_var="$1"
+    local version="$2"
+    local asset_name="$3"
     local base_url="https://github.com/SagerNet/sing-box/releases/download"
 
     printf -v "$__result_var" '%s' \
-        "${base_url}/v${version}/sing-box-${version}-linux-${arch}-musl.tar.gz"
+        "${base_url}/v${version}/${asset_name}"
 }
 
 download_singbox_binary() {
     local __result_var="$1"
     local version="$2"
-    local tmpdir="$3"
+    local release_json="$3"
+    local tmpdir="$4"
     local detected_arch
+    local asset_name
+    local expected_sha256
+    local actual_sha256
     local download_url
     local archive
     local extract_dir
     local downloaded_bin
 
     detect_singbox_arch detected_arch || return 1
-    build_download_url download_url "$version" "$detected_arch"
+    build_asset_name asset_name "$version" "$detected_arch"
+    get_release_asset_digest expected_sha256 "$release_json" "$asset_name" || return 1
+    build_download_url download_url "$version" "$asset_name"
 
-    archive="$tmpdir/sing-box.tar.gz"
+    archive="$tmpdir/$asset_name"
     extract_dir="$tmpdir/extract"
     downloaded_bin="$extract_dir/sing-box"
 
-    if ! curl -sfL --connect-timeout 15 --max-time 60 -o "$archive" "$download_url"; then
+    if ! curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors \
+        --connect-timeout 15 --max-time 180 \
+        -o "$archive" "$download_url"; then
         print_err "下载失败，请检查网络或版本可用性"
         return 1
     fi
+
+    if ! actual_sha256=$(sha256sum "$archive" | awk '{print $1}'); then
+        print_err "无法计算下载文件 SHA-256"
+        rm -f "$archive"
+        return 1
+    fi
+
+    if [[ ! "$actual_sha256" =~ ^[0-9a-fA-F]{64}$ || \
+          "${actual_sha256,,}" != "${expected_sha256,,}" ]]; then
+        print_err "下载文件 SHA-256 校验失败，已拒绝安装"
+        rm -f "$archive"
+        return 1
+    fi
+    print_ok "下载文件 SHA-256 校验通过"
 
     if ! mkdir -p "$extract_dir"; then
         print_err "创建解压目录失败"
@@ -443,7 +540,7 @@ description="sing-box proxy service"
 command="$SINGBOX_BIN"
 command_args="run -c $DEFAULT_CONFIG"
 command_background=true
-pidfile="/run/${SERVICE_NAME}.pid"
+pidfile="$PID_FILE"
 output_log="${LOG_DIR}/access.log"
 error_log="${LOG_DIR}/error.log"
 retry="SIGTERM/5/SIGKILL/5"
@@ -480,7 +577,8 @@ install_singbox() {
 
     print_info "正在获取最新版本..."
     local latest
-    get_latest_version latest || return 1
+    local release_payload
+    get_latest_release latest release_payload || return 1
     print_info "最新版本: $latest，正在下载..."
 
     local tmpdir
@@ -491,29 +589,26 @@ install_singbox() {
     trap 'rm -rf "$tmpdir"; trap - RETURN' RETURN
 
     local new_bin
-    download_singbox_binary new_bin "$latest" "$tmpdir" || return 1
+    download_singbox_binary new_bin "$latest" "$release_payload" "$tmpdir" || return 1
 
     print_info "正在安装..."
     install_binary_atomic "$new_bin" "$SINGBOX_BIN" || return 1
-    
+
     print_info "正在注册系统服务..."
     if ! mkdir -p "$LOG_DIR"; then
         print_err "创建日志目录失败"
         return 1
     fi
     write_service_file_atomic || return 1
-    if ! mkdir -p /etc/sing-box; then
+    if ! mkdir -p "$CONFIG_DIR"; then
         print_err "创建配置目录失败"
         return 1
     fi
-    
+
     local installed_version
-    if ! installed_version=$("$SINGBOX_BIN" version | head -1); then
-        print_err "安装后二进制验证失败"
-        return 1
-    fi
+    get_singbox_version_info installed_version line || return 1
     print_ok "安装成功！版本: $installed_version"
-    print_info "请将配置文件放入 /etc/sing-box/config.json 然后启动服务"
+    print_info "请将配置文件放入 $DEFAULT_CONFIG 然后启动服务"
 }
 
 uninstall_singbox() {
@@ -522,7 +617,6 @@ uninstall_singbox() {
 
     print_info "正在停止服务..."
     rc-service "$SERVICE_NAME" stop 2>/dev/null || true
-    pkill -TERM -x "$SERVICE_NAME" 2>/dev/null || true
     rc-update del "$SERVICE_NAME" default 2>/dev/null || true
 
     print_info "正在删除文件..."
@@ -534,13 +628,13 @@ uninstall_singbox() {
         print_err "删除服务文件失败"
         return 1
     fi
-    
+
     print_info "正在清理配置、数据和日志目录..."
-    if ! rm -rf /etc/sing-box/; then
+    if ! rm -rf "$CONFIG_DIR"; then
         print_err "删除配置目录失败"
         return 1
     fi
-    if ! rm -rf /var/lib/sing-box/; then
+    if ! rm -rf "$DATA_DIR"; then
         print_err "删除数据目录失败"
         return 1
     fi
@@ -548,30 +642,92 @@ uninstall_singbox() {
         print_err "删除日志目录失败"
         return 1
     fi
-    
+
     print_ok "卸载完成！"
 }
 
 # ================= 升级管理 =================
 
+is_service_running() {
+    rc-service "$SERVICE_NAME" status >/dev/null 2>&1
+}
+
+wait_for_service_running() {
+    local attempts=5
+    local i
+
+    for ((i = 0; i < attempts; i++)); do
+        if is_service_running; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+restore_previous_binary() {
+    local backup="$1"
+
+    if [[ ! -f "$backup" ]]; then
+        print_err "找不到旧版本备份，无法回滚: $backup"
+        return 1
+    fi
+
+    if ! install_binary_atomic "$backup" "$SINGBOX_BIN"; then
+        print_err "恢复旧版本二进制失败"
+        return 1
+    fi
+    return 0
+}
+
+rollback_upgrade() {
+    local backup="$1"
+    local was_running="$2"
+    local reason="$3"
+
+    print_err "$reason，正在回滚旧版本..."
+    if [[ "$was_running" == "true" ]]; then
+        rc-service "$SERVICE_NAME" stop >/dev/null 2>&1 || true
+    fi
+
+    restore_previous_binary "$backup" || return 1
+
+    if [[ "$was_running" == "true" ]]; then
+        if ! rc-service "$SERVICE_NAME" start >/dev/null 2>&1 || ! wait_for_service_running; then
+            print_err "旧版本已恢复，但服务恢复启动失败，请立即人工检查"
+            return 1
+        fi
+    fi
+
+    return 0
+}
+
+rollback_and_fail() {
+    local backup="$1"
+    local was_running="$2"
+    local reason="$3"
+
+    if rollback_upgrade "$backup" "$was_running" "$reason"; then
+        if ! rm -f "$backup"; then
+            print_warn "旧版本已恢复，但备份清理失败: $backup"
+        fi
+        return 1
+    fi
+
+    print_err "自动回滚失败，旧版本备份已保留: $backup"
+    return 2
+}
+
 upgrade_singbox() {
     check_bin || return
     print_info "检查新版本..."
     local latest
-    get_latest_version latest || return 1
+    local release_payload
+    get_latest_release latest release_payload || return 1
 
     local current
-    if ! current=$(
-        "$SINGBOX_BIN" version \
-            | head -1 \
-            | grep -o '[0-9][0-9A-Za-z.+-]*' \
-            | head -1
-    ); then
-        print_err "无法获取当前版本"
-        return 1
-    fi
-    
-    [[ -z "$current" ]] && { print_err "无法获取当前版本"; return 1; }
+    get_singbox_version_info current number || return 1
+
     echo "当前: $current | 最新: $latest"
     [[ "$current" == "$latest" ]] && { print_ok "已是最新版"; return; }
 
@@ -586,47 +742,61 @@ upgrade_singbox() {
     trap 'rm -rf "$tmpdir"; trap - RETURN' RETURN
 
     local new_bin
-    download_singbox_binary new_bin "$latest" "$tmpdir" || return 1
+    download_singbox_binary new_bin "$latest" "$release_payload" "$tmpdir" || return 1
 
-    # 覆盖前自动备份旧版本（验证失败可回滚）
-    if ! cp "$SINGBOX_BIN" "${SINGBOX_BIN}.bak"; then
+    local backup="${SINGBOX_BIN}.bak.$$"
+    local was_running=false
+    if is_service_running; then
+        was_running=true
+    fi
+
+    if ! cp "$SINGBOX_BIN" "$backup"; then
         print_err "备份旧版本失败"
+        return 1
+    fi
+    if ! chmod +x "$backup"; then
+        print_err "设置旧版本备份权限失败"
+        rm -f "$backup"
         return 1
     fi
 
     if ! install_binary_atomic "$new_bin" "$SINGBOX_BIN"; then
-        rm -f "${SINGBOX_BIN}.bak"
+        print_err "替换新版本二进制失败"
+        rm -f "$backup"
         return 1
     fi
 
     if ! "$SINGBOX_BIN" version &>/dev/null; then
-        print_err "升级后二进制验证失败，正在恢复旧版本..."
-        if [[ -f "${SINGBOX_BIN}.bak" ]]; then
-            mv -f "${SINGBOX_BIN}.bak" "$SINGBOX_BIN" || return 1
-        fi
-        return 1
+        rollback_and_fail "$backup" "$was_running" "升级后二进制验证失败"
+        return $?
     fi
 
     if [[ -f "$DEFAULT_CONFIG" ]] && ! "$SINGBOX_BIN" check -c "$DEFAULT_CONFIG"; then
-        print_err "升级后二进制与当前配置不兼容，正在恢复旧版本..."
-        if [[ -f "${SINGBOX_BIN}.bak" ]]; then
-            mv -f "${SINGBOX_BIN}.bak" "$SINGBOX_BIN" || return 1
+        rollback_and_fail "$backup" "$was_running" "升级后二进制与当前配置不兼容"
+        return $?
+    fi
+
+    if [[ "$was_running" == "true" ]]; then
+        print_info "正在重启服务并验证运行状态..."
+        if ! rc-service "$SERVICE_NAME" restart >/dev/null 2>&1 || ! wait_for_service_running; then
+            rollback_and_fail "$backup" "$was_running" "新版本服务启动或健康检查失败"
+            return $?
         fi
+    fi
+
+    if ! rm -f "$backup"; then
+        print_err "升级完成，但清理旧版本备份失败: $backup"
         return 1
     fi
 
-    # 验证通过，清理备份和临时文件
-    if ! rm -f "${SINGBOX_BIN}.bak"; then
-        print_err "清理旧版本备份失败"
-        return 1
-    fi
     local upgraded_version
-    if ! upgraded_version=$("$SINGBOX_BIN" version | head -1); then
-        print_err "升级后二进制版本读取失败"
-        return 1
-    fi
+    get_singbox_version_info upgraded_version line || return 1
     print_ok "升级成功！版本: $upgraded_version"
-    print_info "请手动重启服务以生效: rc-service sing-box restart"
+    if [[ "$was_running" == "true" ]]; then
+        print_info "服务已重启并通过状态检查"
+    else
+        print_info "服务升级前未运行，未自动启动"
+    fi
 }
 
 # ================= 菜单 =================
@@ -676,10 +846,12 @@ menu() {
 main() {
     check_root
     check_alpine
+    ensure_jq
     check_deps
     check_openrc
     acquire_lock
-    trap handle_interrupt INT TERM
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
     while true; do
         menu || true
         read -n 1 -s -r -p "按回车继续..."
