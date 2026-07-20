@@ -1,6 +1,6 @@
 #!/bin/bash
 # sing-box 全能管理脚本 v2.1 (Alpine Linux 专用)
-# 功能：服务管理 / 配置工具 / 密钥生成 / 一键安装卸载 / 自动升级
+# 功能：服务管理 / 配置工具 / 密钥生成 / 安装卸载 / 自动升级
 
 set -euo pipefail
 
